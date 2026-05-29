@@ -1,0 +1,1829 @@
+---
+title: "260529 NCAP BulkSeq Signatures"
+output: html_document
+date: "2026-05-01"
+author: Rebecca Pereles, Lonnie Shea Lab
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+# Housekeeping
+
+```{r Libraries, results='hide'}
+# Load libraries
+pacman::p_load(tidyverse, plyr, magrittr, stats, dplyr, limma, RColorBrewer, gplots, glmnet,
+               biomaRt, colorspace, ggplot2, fmsb, car, mixOmics, DESeq2, apeglm, rgl, qpcR,
+               boot, caret, ggvenn, grid, devtools, reshape2, gridExtra, factoextra, edgeR,
+               cowplot, pheatmap, coefplot, randomForest, ROCR, genefilter, Hmisc, rdist,
+               factoextra, ggforce, NormqPCR, ggpubr, matrixStats, GSEAmining, ggrepel, ensembldb, msigdbr, ggtree)
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("AnnotationHub")
+
+library(ggbiplot)
+library(ggprism)
+library(tibble)
+library(AnnotationHub)
+library(ensembldb)
+library(DOSE)
+library(msigdbr)
+library(pathview)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(AnnotationDbi)
+library(enrichplot)
+library(enrichR)
+library(EnhancedVolcano)
+library("DEGreport")
+library(org.Mm.eg.db)
+library(AnnotationDbi)
+library(GOSemSim)
+library(ggtreeExtra)
+library(ggtree)
+library(ggkegg)
+library(rstatix)
+library(glmnet)
+#BiocManager::install("ggtreeExtra")
+
+```
+
+
+```{r Set WD} 
+# dataset location 
+path = '/Users/rebeccapereles/Documents/Michigan!!/Shea Lab/Adjuvant NPs Project (NCAP)/NCAP-S1 Sequencing/NCAP-S1 Bulk RNAseq Files 15680-RP'
+
+#set working directory to dataset location
+setwd(path)
+getwd()
+#find dataset in location
+file = list.files(path=path,
+                  pattern = ".tsv" )
+file
+```
+
+# Helper Functions
+
+```{r Helper Functions}
+#' Apply a trained cv.glmnet signature to a new sample matrix.
+#'
+#' @param model      A fitted cv.glmnet object.
+#' @param new_data   A samples-x-genes matrix for the new samples.
+#' @param true_labels Optional vector of known labels (same order as new_data rows).
+#'                    If provided, adds `true` and `correct` columns.
+#' @param sig_genes  Optional character vector of signature gene names. If NULL,
+#'                   non-zero coefficients at `s` are used automatically.
+#' @param s          Lambda value passed to predict(); default "lambda.1se".
+#' @param timepoint  Optional string label added as a `timepoint` column (e.g. "W2").
+#'
+#' @return A data frame with columns: [timepoint,] sample, [true,] predicted, prob_S [, correct].
+apply_signature <- function(model, new_data, true_labels = NULL,
+                             sig_genes = NULL, s = "lambda.1se",
+                             timepoint = NULL) {
+  # Extract non-zero signature genes from the model if not supplied
+  if (is.null(sig_genes)) {
+    coefs     <- coef(model, s = s)
+    sig_genes <- rownames(coefs)[coefs[, 1] != 0 & rownames(coefs) != "(Intercept)"]
+    if (length(sig_genes) == 0)
+      stop("No non-zero coefficients found at s = '", s, "'. Try s = 'lambda.min'.")
+  }
+
+  shared <- intersect(sig_genes, colnames(new_data))
+  if (length(shared) == 0)
+    stop("None of the signature genes are present in new_data columns.")
+  if (length(shared) < length(sig_genes))
+    message(length(sig_genes) - length(shared),
+            " signature gene(s) absent from new_data; scoring with ",
+            length(shared), " genes.")
+
+  x_new <- new_data[, shared, drop = FALSE]
+
+  pred_class <- predict(model, x_new, s = s, type = "class")[, 1]
+  pred_prob  <- round(predict(model, x_new, s = s, type = "response")[, 1], 3)
+
+  result <- data.frame(
+    sample    = rownames(x_new),
+    predicted = pred_class,
+    prob_S    = pred_prob,
+    row.names = NULL,
+    stringsAsFactors = FALSE
+  )
+
+  if (!is.null(true_labels)) {
+    result$true    <- as.character(true_labels)
+    result$correct <- as.integer(pred_class == result$true)
+    result <- result[, c("sample", "true", "predicted", "prob_S", "correct")]
+  }
+
+  if (!is.null(timepoint))
+    result <- cbind(timepoint = timepoint, result)
+
+  result
+}
+```
+
+# Data Loading and Filtering
+
+```{r Load Data}
+#read in count data ----
+data <- read.delim("rsem.merged.gene_counts.annot.tsv", 
+                   row.names = NULL)
+
+# Deal with genes that don't have annotated gene symbols (external_gene_name)
+# Use ENSEMBL ID if gene symbol not available
+data$external_gene_name <- ifelse(data$external_gene_name == ".",
+  data$gene_id,
+  data$external_gene_name
+)
+
+# Deal with duplicated gene symbols
+# Combine gene symbol with ENSEMBL ID if non-unique
+data$external_gene_name <- ifelse(duplicated(data$external_gene_name),
+  paste(data$external_gene_name, data$gene_id, sep="_"),
+  data$external_gene_name
+)
+
+# Then we can use the gene symbol column as the row names,
+# and subset the count data for further analysis
+rownames(data) <- data$external_gene_name
+count.data <- data[,6:ncol(data)] # All columns after 5 are count data
+gene_info = data[,1:5] # Columns with gene names and description 
+
+#just leave number in sample name 
+#colnames(count.data) <- sub("X15680.RP.", "", colnames(count.data))
+
+#sample information
+#read information about samples provided by AGC
+info_file1= read.csv('DemuxStats_15680-RP.csv', 
+                     check.names=FALSE,header=T, sep=",")
+
+# Created a new column to match column names in raw data
+info_file1$Sample_name = make.names(info_file1$Sample_ID)
+
+# Verify that the order of count.data matches info_file1
+info_file1$Sample_name == colnames(count.data)
+sum(info_file1$Sample_name == colnames(count.data)) # ensure all 64 samples are true
+
+# Rename the columns of count.data to be my naming convention
+colnames(count.data) = info_file1$Description
+
+```
+
+```{r Filter Samples}
+data_filt <- count.data[rowSums(count.data)>0,] # Remove 0 expression genes
+
+#Remove genes Gm- or -Rik or -ps or ENSMUS-
+data_filt1 = data_filt[!grepl("^Gm|Rik$|Rik[0-9]+$|-ps[0-9]+$|-ps$|^ENSMUS", rownames(data_filt)),] 
+
+# Remove low expression genes
+filt_low <- 10
+keep1 <- rowSums(data_filt1) > (filt_low * 26) # Low count filter, required
+data_filt1 <- data_filt1[keep1,] # Apply filter to counts data
+dim(data_filt1) # Dimensions after applying low filter
+
+```
+
+# UT D18 Signature Generation
+
+```{r DESeq2 - UT D18}
+# Subset UT samples from D18
+ut_SandNS_D18 <- data_filt1 %>% dplyr::select(matches("^UT_(S|NS).*_D18$"))
+ut_SandNS_D18 <- round(ut_SandNS_D18,0) # Make all counts integers
+
+# Second dataframe with the condition for each UT D18 sample
+coldata <- data.frame(row.names = colnames(ut_SandNS_D18), 
+                      condition = ifelse(grepl("UT_S", colnames(ut_SandNS_D18)), "S", "NS"))
+
+# Set the condition as a factor (a datatype) and list NS first so it's the baseline comparison, which is more intuitive
+coldata$condition <- factor(coldata$condition, levels = c("NS", "S"))
+
+dds <- DESeqDataSetFromMatrix(
+  countData = ut_SandNS_D18,
+  colData = coldata,
+  design = ~ condition
+)
+
+dds <- dds[rowSums(counts(dds)) > 10, ]
+
+dds <- DESeq(dds)
+
+resultsNames(dds)
+res <- results(dds, pAdjustMethod = "none")
+
+summary(res)
+
+# Order by adjusted p-value, which is the same as the p-value if the pAdjustMethod = none above
+res_ordered <- res[order(res$padj), ]
+view(res_ordered %>% data.frame())
+
+# Shrink log2FC
+resLFC <- lfcShrink(dds, coef="condition_S_vs_NS", type="apeglm")
+
+# Visualize!
+res_df <- as.data.frame(res)
+
+ggplot(res_df, aes(x=log2FoldChange, y=-log10(padj))) +
+  geom_point(alpha=0.5) +
+  theme_minimal() + 
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_vline(xintercept = -1) + 
+  geom_vline(xintercept = 1) 
+
+LFc = 1 #logfold change cutoff for DEGs
+pc = 0.05 #pvalue cutoff for DEGs
+
+# Subset results by log2FC > |1| and pval < 0.07 
+upUT_S_D18 <- res_df[!is.na(res_df$pvalue) & res_df$pvalue < 0.05 & res_df$log2FoldChange > 1,]
+dnUT_S_D18 <- res_df[!is.na(res_df$pvalue) & res_df$pvalue < 0.05 & res_df$log2FoldChange < -1,]
+degUT_D18 <- res_df[!is.na(res_df$pvalue) & res_df$pvalue < 0.05 & abs(res_df$log2FoldChange) > 1,]
+
+```
+
+```{r Elastic Net Signature Generation - UT D18}
+set.seed(7823) # Keep the seed consistent for reproducibility
+
+# Using all genes (not just DEGs) was unsuccessful, so filter to just DEGs to improve the model
+x <- t(as.matrix(ut_SandNS_D18)) # now: 12 x genes
+deg_genes <- rownames(degUT_D18)
+x_deg <- x[, colnames(x) %in% deg_genes, drop = FALSE]
+
+y <- coldata$condition # factor: "NS" (reference) vs "S"
+
+n <- nrow(x_deg)
+
+# Initialize empty vectors for the for loop
+gene_freq <- setNames(rep(0L, ncol(x_deg)), colnames(x_deg))
+gene_list <- vector("list", n)
+accuracy_vec <- rep(NA_real_, n)
+
+# LOOCV: leave one sample out per iteration
+for (i in seq_len(n)) {
+  print(i)
+  
+  # Leave sample i out
+   x_tr <- x_deg[-i, , drop = FALSE]
+   y_tr <- y[-i]
+   x_lo <- x_deg[i, , drop = FALSE]
+   y_lo <- y[i]
+  
+  # # Random partition of dataset (~2/3 train per class)
+  # train_index <- sample(1:6, 4)
+  # train_index <- append(train_index, (sample(7:12, 4)))
+  # 
+  # x_train <- x[train_index,]
+  # y_train <- coldata[train_index,]
+  # x_test <- x[-train_index,]
+  # y_test <- coldata[-train_index,]
+  
+  # cv.glmnet: LOOCV to choose lambda
+  # Could add suppressWarnings( before cv.glmnet() if you don't want to see warnings
+  cvfit <- cv.glmnet(x_tr, y_tr, 
+                     family = "binomial",
+                     alpha  = 0.5,        
+                     nfolds = nrow(x_tr), # LOOCV for small n
+                     type.measure = "class")
+  
+  # Record selected genes (lambda.min -> lowest CV error to retain more genes)
+  coef_mat <- coef(cvfit, s = "lambda.1se")
+  selected <- rownames(coef_mat)[coef_mat[, 1] != 0 & 
+                                   rownames(coef_mat) != "(Intercept)"]
+  gene_list[[i]] <- selected
+  gene_freq[selected] <- gene_freq[selected] + 1L
+  
+  # Correct (1) or incorrect (0) for the left-out sample
+  pred_class <- predict(cvfit, x_lo, s = "lambda.1se", type = "class")[, 1]
+  accuracy_vec[i] <- as.integer(pred_class == as.character(y_lo))
+}
+
+# Gene selection frequency
+gene_freq_df <- data.frame(
+gene         = names(gene_freq),
+n_selected   = as.integer(gene_freq),
+pct_selected = round(as.integer(gene_freq) / n * 100, 1)) |>
+dplyr::arrange(desc(n_selected))
+
+# Signature: genes selected in >= 60% of runs
+signature_genes <- gene_freq_df$gene[gene_freq_df$pct_selected >= 60]
+cat("Signature size (>= 60% selection frequency):", length(signature_genes), "\n")
+
+# Print final signature
+cat("\nFinal gene signature:\n")
+print(signature_genes)
+cat("\nPrediction accuracy for left-out sample:\n")
+print(sum(accuracy_vec)/n*100)
+
+```
+
+``` {r Heatmap of UT D18 Signature}
+# Pull VST-normalized counts from DESeq2 object for clean visualization
+vst_mat <- assay(vst(dds))
+
+# Subset to signature genes and UT samples
+heat_mat <- vst_mat[signature_genes, colnames(ut_SandNS_D18)]
+
+# Annotation bar for condition
+anno_col <- data.frame(Condition = coldata$condition, row.names = rownames(coldata))
+
+pheatmap(heat_mat,
+         annotation_col  = anno_col,
+         scale           = "row",
+         cluster_cols    = TRUE,
+         cluster_rows    = TRUE,
+         show_colnames   = TRUE,
+         fontsize_row    = 10,
+         main            = "Signature Genes — UT D18 Samples")
+
+```
+
+```{r PCA Plot of UT D18 Signature}
+ggbiplot(prcomp(t(heat_mat), scale.=T), 
+         choices = c(1,2),
+         ellipse=T, groups=factor(coldata$condition, levels = c("S", "NS")),
+         var.axes=T, var.scale=1) + 
+  theme_classic() + 
+  xlim(-2,2.5) +
+  theme(legend.position = "top") +
+  ggtitle("PCA Plot - UT D18 Signature") 
+
+```
+
+# T D18 Signature Generation
+
+```{r DESeq2 - T D18}
+# Subset T samples from D18
+T_SandNS_D18 <- data_filt1 %>% dplyr::select(matches("^T_(S|NS).*_D18$"))
+T_SandNS_D18 <- round(T_SandNS_D18, 0) # Make all counts integers
+
+# Second dataframe with the condition for each T D18 sample
+T_coldata <- data.frame(row.names = colnames(T_SandNS_D18), 
+                      condition = ifelse(grepl("T_S", colnames(T_SandNS_D18)), "S", "NS"))
+
+# Set the condition as a factor (a datatype) and list NS first so it's the baseline comparison, which is more intuitive
+T_coldata$condition <- factor(T_coldata$condition, levels = c("NS", "S"))
+
+T_dds <- DESeqDataSetFromMatrix(
+  countData = T_SandNS_D18,
+  colData = T_coldata,
+  design = ~ condition)
+
+T_dds <- T_dds[rowSums(counts(T_dds)) > 10, ]
+
+T_dds <- DESeq(T_dds)
+
+resultsNames(T_dds)
+T_res <- results(T_dds, pAdjustMethod = "none")
+
+summary(T_res)
+
+# Order by adjusted p-value, which is the same as the p-value if the pAdjustMethod = none above
+T_res_ordered <- T_res[order(T_res$padj), ]
+view(T_res_ordered %>% data.frame())
+
+# Shrink log2FC
+T_resLFC <- lfcShrink(T_dds, coef="condition_S_vs_NS", type="apeglm")
+
+# Visualize!
+T_res_df <- as.data.frame(T_res)
+
+ggplot(T_res_df, aes(x=log2FoldChange, y=-log10(padj))) +
+  geom_point(alpha=0.5) +
+  theme_minimal() + 
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_vline(xintercept = -1) + 
+  geom_vline(xintercept = 1) +
+  xlim(-6,5)
+
+LFc = 1 #logfold change cutoff for DEGs
+pc = 0.05 #pvalue cutoff for DEGs
+
+# Subset results by log2FC > |1| and pval < 0.1 
+upT_S_D18 <- T_res_df[!is.na(T_res_df$pvalue) & T_res_df$pvalue < 0.05 & T_res_df$log2FoldChange > 1,]
+dnT_S_D18 <- T_res_df[!is.na(T_res_df$pvalue) & T_res_df$pvalue < 0.05 & T_res_df$log2FoldChange < -1,]
+degT_D18 <- T_res_df[!is.na(T_res_df$pvalue) & T_res_df$pvalue < 0.05 & abs(T_res_df$log2FoldChange) > 1,]
+
+```
+
+```{r Elastic Net Signature Generation - T D18}
+set.seed(7823) # Keep the seed consistent for reproducibility
+
+# Using all genes (not just DEGs) was unsuccessful, so filter to just DEGs to improve the model
+x_t <- t(as.matrix(T_SandNS_D18)) # now: 12 x genes
+deg_genes_t <- rownames(degT_D18)
+x_deg_t <- x_t[, colnames(x) %in% deg_genes_t, drop = FALSE]
+
+y_t <- T_coldata$condition # factor: "NS" (reference) vs "S"
+
+n_t <- nrow(x_deg_t)
+
+# Initialize empty vectors for the for loop
+T_gene_freq <- setNames(rep(0L, ncol(x_deg_t)), colnames(x_deg_t))
+T_gene_list <- vector("list", n_t)
+T_accuracy_vec <- rep(NA_real_, n_t)
+
+# LOOCV: leave one sample out per iteration
+for (i in seq_len(n_t)) {
+  print(i)
+  
+  # Leave sample i out
+   x_tr <- x_deg_t[-i, , drop = FALSE]
+   y_tr <- y_t[-i]
+   x_lo <- x_deg_t[i, , drop = FALSE]
+   y_lo <- y_t[i]
+  
+  # cv.glmnet: LOOCV to choose lambda
+  # Could add suppressWarnings( before cv.glmnet() if you don't want to see warnings
+  cvfit <- cv.glmnet(x_tr, y_tr, 
+                     family = "binomial",
+                     alpha  = 0.5,        
+                     nfolds = nrow(x_tr), # LOOCV for small n
+                     type.measure = "class")
+  
+  # Record selected genes (lambda.min -> lowest CV error to retain more genes)
+  coef_mat <- coef(cvfit, s = "lambda.1se")
+  selected <- rownames(coef_mat)[coef_mat[, 1] != 0 & 
+                                   rownames(coef_mat) != "(Intercept)"]
+  T_gene_list[[i]] <- selected
+  T_gene_freq[selected] <- T_gene_freq[selected] + 1L
+  
+  # Correct (1) or incorrect (0) for the left-out sample
+  pred_class <- predict(cvfit, x_lo, s = "lambda.1se", type = "class")[, 1]
+  T_accuracy_vec[i] <- as.integer(pred_class == as.character(y_lo))
+}
+
+# Gene selection frequency
+T_gene_freq_df <- data.frame(
+gene         = names(T_gene_freq),
+n_selected   = as.integer(T_gene_freq),
+pct_selected = round(as.integer(T_gene_freq) / n_t * 100, 1)) |>
+dplyr::arrange(desc(n_selected))
+
+# Signature: genes selected in >= 60% of runs
+T_signature_genes <- T_gene_freq_df$gene[T_gene_freq_df$pct_selected >= 60]
+cat("Signature size (>= 60% selection frequency):", length(T_signature_genes), "\n")
+
+# Print final signature
+cat("\nFinal gene signature:\n")
+print(T_signature_genes)
+cat("\nPrediction accuracy for left-out sample:\n")
+print(sum(T_accuracy_vec)/n_t*100)
+
+```
+
+```{r Heatmap of T D18 Signature}
+# Pull VST-normalized counts from DESeq2 object for clean visualization
+vst_mat_T <- assay(vst(T_dds))
+
+# Subset to signature genes and UT samples
+heat_mat_T <- vst_mat_T[T_signature_genes, colnames(T_SandNS_D18)]
+
+# Annotation bar for condition
+anno_col_T <- data.frame(Condition = T_coldata$condition, row.names = rownames(T_coldata))
+
+pheatmap(heat_mat_T,
+         annotation_col  = anno_col_T,
+         scale           = "row",
+         cluster_cols    = TRUE,
+         cluster_rows    = TRUE,
+         show_colnames   = TRUE,
+         fontsize_row    = 10,
+         main            = "Signature Genes — T D18 Samples")
+
+```
+
+```{r PCA Plot of T D18 Signature}
+ggbiplot(prcomp(t(heat_mat_T), scale.=T), 
+         choices = c(1,2),
+         ellipse=T, groups=factor(T_coldata$condition, levels = c("S", "NS")),
+         var.axes=T, var.scale=1) + 
+  theme_classic() + 
+  # xlim(-2,2.5) +
+  theme(legend.position = "top") +
+  ggtitle("PCA Plot - T D18 Signature") 
+
+```
+
+# Signature Application - UT D18 to T D18
+
+``` {r Apply UT D18 Signature to T D18 Samples}
+# Retrain a final model on D18 UT samples using only the UT signature genes
+x_ut_sig <- x[, colnames(x) %in% signature_genes, drop = FALSE]
+
+ut_final_fit <- cv.glmnet(x_ut_sig, y,
+                           family       = "binomial",
+                           alpha        = 0.5,
+                           nfolds       = nrow(x_ut_sig),  # LOOCV
+                           type.measure = "class")
+
+# Subset T samples to the same signature genes
+shared_genes  <- intersect(signature_genes, colnames(x_t))
+x_t_sig       <- x_t[, shared_genes, drop = FALSE]
+
+# Predict S vs NS in T samples
+T_pred_class <- predict(ut_final_fit, x_t_sig, s = "lambda.1se", type = "class")[, 1]
+T_pred_prob  <- predict(ut_final_fit, x_t_sig, s = "lambda.1se", type = "response")[, 1]
+
+# Accuracy against known T labels
+T_pred_correct <- as.integer(T_pred_class == as.character(y_t))
+
+T_pred_df <- data.frame(sample    = rownames(x_t_sig),
+                        true      = as.character(y_t),
+                        predicted = T_pred_class,
+                        prob_S    = round(T_pred_prob, 3),
+                        correct   = T_pred_correct)
+
+cat("UT signature genes used:    ", length(signature_genes), "\n")
+cat("Genes found in T matrix:    ", length(shared_genes), "\n\n")
+cat("Predicted classes (T samples):\n")
+print(T_pred_df)
+cat("\nAccuracy of UT signature on T samples:", round(mean(T_pred_correct) * 100, 1), "%\n")
+
+# Determine number of predicted non-survivors that became survivors because of NPs
+np_benefit_df <- T_pred_df[T_pred_df$true == "S",]
+np_benefit <- sum(T_pred_correct == FALSE & y_t == "S")/nrow(np_benefit_df)
+cat("Percent of mice that benefitted from NPs:", round(np_benefit * 100, 1), "%\n")
+
+# Accuracy of the model for T NS samples
+np_ns_df <- T_pred_df[T_pred_df$true == "NS",]
+np_ns <- sum(T_pred_correct == TRUE & y_t == "NS")/nrow(np_ns_df)
+print(np_ns_df)
+cat("Accuracy of the model for T NS samples:", round(np_ns * 100, 1), "%\n")
+
+```
+
+# 17-Sample Signature Generation
+
+``` {r New Model: UT D18 + T NS D18 Samples}
+# T NS mice died despite NP treatment, making their NS status unambiguous.
+# Adding them to the UT training set expands NS representation (6 -> 11 samples)
+# without label ambiguity, since their outcome is independent of NP benefit.
+# Note: at D18, mice have not yet received NPs, so T and UT samples are biologically identical.
+
+set.seed(7823)
+
+# --- Build combined training matrix ---
+# Extract T NS samples and filter to UT DEG features
+t_ns_idx   <- which(y_t == "NS")
+x_t_ns_deg <- x_t[t_ns_idx, colnames(x_t) %in% deg_genes, drop = FALSE]
+
+# Combine UT (12 samples) + T NS (5 samples)
+x_combined <- rbind(x_deg, x_t_ns_deg)
+y_combined <- factor(c(as.character(y), rep("NS", nrow(x_t_ns_deg))),
+                     levels = c("NS", "S"))
+
+cat("Combined training set:\n")
+print(table(y_combined))
+cat("Feature count:", ncol(x_combined), "\n\n")
+
+# --- LOOCV on combined training set ---
+n_comb         <- nrow(x_combined)
+gene_freq_comb <- setNames(rep(0L, ncol(x_combined)), colnames(x_combined))
+gene_list_comb <- vector("list", n_comb)
+accuracy_comb  <- rep(NA_real_, n_comb)
+
+for (i in seq_len(n_comb)) {
+  x_tr <- x_combined[-i, , drop = FALSE]
+  y_tr <- y_combined[-i]
+  x_lo <- x_combined[i,  , drop = FALSE]
+  y_lo <- y_combined[i]
+
+  # Recompute weights per fold so they reflect the actual training class counts
+  n_ns_tr <- sum(y_tr == "NS")
+  n_s_tr  <- sum(y_tr == "S")
+  w_tr    <- ifelse(y_tr == "NS", 1 / n_ns_tr, 1 / n_s_tr)
+
+  cvfit_c <- cv.glmnet(x_tr, y_tr,
+                       weights      = w_tr,
+                       family       = "binomial",
+                       alpha        = 0.5,
+                       nfolds       = nrow(x_tr), # LOOCV for small n
+                       type.measure = "class")
+
+  coef_c     <- coef(cvfit_c, s = "lambda.1se")
+  selected_c <- rownames(coef_c)[coef_c[, 1] != 0 & rownames(coef_c) != "(Intercept)"]
+  gene_list_comb[[i]] <- selected_c
+  gene_freq_comb[selected_c] <- gene_freq_comb[selected_c] + 1L
+
+  pred_c        <- predict(cvfit_c, x_lo, s = "lambda.1se", type = "class")[, 1]
+  accuracy_comb[i] <- as.integer(pred_c == as.character(y_lo))
+}
+
+# Gene selection frequency
+gene_freq_comb_df <- data.frame(
+  gene         = names(gene_freq_comb),
+  n_selected   = as.integer(gene_freq_comb),
+  pct_selected = round(as.integer(gene_freq_comb) / n_comb * 100, 1)
+) |> dplyr::arrange(desc(n_selected))
+
+# Signature: genes selected in >= 60% of LOOCV runs
+signature_genes_comb <- gene_freq_comb_df$gene[gene_freq_comb_df$pct_selected >= 60]
+
+# Per-sample LOOCV results
+loocv_comb_df <- data.frame(
+  sample  = rownames(x_combined),
+  true    = as.character(y_combined),
+  correct = accuracy_comb
+)
+
+cat("=== Combined LOOCV Results ===\n")
+cat("Overall accuracy:", round(sum(accuracy_comb) / n_comb * 100, 1), "%\n")
+cat("NS accuracy:     ", round(mean(accuracy_comb[y_combined == "NS"]) * 100, 1), "%\n")
+cat("S  accuracy:     ", round(mean(accuracy_comb[y_combined == "S"])  * 100, 1), "%\n\n")
+print(loocv_comb_df)
+cat("\nSignature size (>= 60% selection frequency):", length(signature_genes_comb), "\n")
+print(signature_genes_comb)
+
+# --- Retrain final model on all 17 combined samples ---
+x_comb_sig <- x_combined[, colnames(x_combined) %in% signature_genes_comb, drop = FALSE]
+
+# Weights inversely proportional to class frequency to correct for 11 NS vs 6 S imbalance
+n_ns <- sum(y_combined == "NS")
+n_s  <- sum(y_combined == "S")
+w_combined <- ifelse(y_combined == "NS", 1 / n_ns, 1 / n_s)
+
+final_fit_comb <- cv.glmnet(x_comb_sig, y_combined,
+                             weights      = w_combined,
+                             family       = "binomial",
+                             alpha        = 0.5,
+                             nfolds       = nrow(x_comb_sig),
+                             type.measure = "class")
+
+# Apply to T S samples only (T NS were part of the training set)
+t_s_idx   <- which(y_t == "S")
+x_t_s_sig <- x_t[t_s_idx, colnames(x_t) %in% signature_genes_comb, drop = FALSE]
+
+T_S_pred_class <- predict(final_fit_comb, x_t_s_sig, s = "lambda.1se", type = "class")[, 1]
+T_S_pred_prob  <- predict(final_fit_comb, x_t_s_sig, s = "lambda.1se", type = "response")[, 1]
+
+T_S_pred_df <- data.frame(
+  sample    = rownames(x_t_s_sig),
+  predicted = T_S_pred_class,
+  prob_S    = round(T_S_pred_prob, 3)
+)
+
+cat("\n=== Predictions for T Survivor Samples ===\n")
+cat("(T NS samples were in training — see LOOCV above for their performance)\n\n")
+print(T_S_pred_df)
+
+# T S mice predicted as NS = mice whose D18 profile looked like NS but survived -> NP benefit
+np_benefit_comb <- sum(T_S_pred_class == "NS") / nrow(T_S_pred_df)
+cat("\nT S mice predicted as NS (potential NP benefit):",
+    sum(T_S_pred_class == "NS"), "/", nrow(T_S_pred_df),
+    paste0("(", round(np_benefit_comb * 100, 1), "%)\n"))
+
+```
+
+```{r Heatmap of 17 training samples with UT D18 DEGs}
+# Pull VST-normalized counts from DESeq2 object for clean visualization
+vst_mat_17 <- assay(vst(dds))
+
+# Subset to UT signature genes and combined samples
+heat_mat_17 <- vst_mat_17[signature_genes_comb, rownames(x_comb_sig)]
+head(vst_mat_17)
+setdiff(signature_genes_comb, rownames(vst_mat_17))
+setdiff(rownames(x_comb_sig), colnames(vst_mat_17))
+
+# Annotation bar for condition
+anno_col_17 <- data.frame(Condition = comb_coldata[rownames(x_comb_sig), "condition"], 
+                          # Treatment = comb_coldata[rownames(x_comb_sig), "treatment"],
+                          row.names = rownames(x_comb_sig))
+
+pheatmap(heat_mat_17,
+         annotation_col  = anno_col_17,
+         scale           = "row",
+         cluster_cols    = TRUE,
+         cluster_rows    = TRUE,
+         show_colnames   = TRUE,
+         fontsize_row    = 10,
+         main            = "Signature Genes — UT D18 & T NS D18 Samples from UT DEGs")
+
+```
+So UT DEGs don't stratify all 17 samples very accurately
+
+```{r PCA Plot of 17-Sample Signature from UT DEGs}
+ggbiplot(prcomp(t(heat_mat_17), scale.=T), 
+         choices = c(1,2),
+         ellipse=T, groups=comb_coldata$condition,
+         var.axes=T, var.scale=1) + 
+  theme_classic() + 
+  ggtitle("PCA Plot - 17-Sample Signature from UT DEGs") 
+
+```
+
+
+```{r Rerun DESeq2 on all 17 training samples}
+# Subset T NS samples from D18
+T_NS_D18 <- data_filt1 %>% dplyr::select(matches("^T_NS.*_D18$"))
+T_NS_D18 <- round(T_NS_D18, 0) # Make all counts integers
+
+comb_samples <- cbind(T_NS_D18, ut_SandNS_D18)
+
+# Second dataframe with the condition for each T D18 sample
+comb_coldata <- data.frame(row.names = colnames(comb_samples), 
+                           condition = ifelse(grepl("NS", colnames(comb_samples)), "NS", "S"),
+                           treatment = ifelse(grepl("UT", colnames(comb_samples)),"UT", "T"))
+
+# Set the condition as a factor (a datatype) and list NS first so it's the baseline comparison, which is more intuitive
+comb_coldata$condition <- factor(comb_coldata$condition, levels = c("NS", "S"))
+
+# c_ = combined
+c_dds <- DESeqDataSetFromMatrix(
+  countData = comb_samples,
+  colData = comb_coldata,
+  design = ~ treatment + condition)
+
+c_dds <- c_dds[rowSums(counts(c_dds)) > 10, ]
+
+c_dds <- DESeq(c_dds)
+
+resultsNames(c_dds)
+c_res <- results(c_dds, pAdjustMethod = "none")
+
+summary(c_res)
+
+# Order by adjusted p-value, which is the same as the p-value if the pAdjustMethod = none above
+c_res_ordered <- c_res[order(c_res$padj), ]
+view(c_res_ordered %>% data.frame())
+
+# Shrink log2FC
+c_resLFC <- lfcShrink(c_dds, coef="condition_S_vs_NS", type="apeglm")
+
+# Visualize!
+c_res_df <- as.data.frame(c_res)
+
+ggplot(c_res_df, aes(x=log2FoldChange, y=-log10(padj))) +
+  geom_point(alpha=0.5) +
+  theme_minimal() + 
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_vline(xintercept = -1) + 
+  geom_vline(xintercept = 1) +
+  xlim(-6,5)
+
+c_deg_genes <- c_res_df[!is.na(c_res_df$pvalue) & c_res_df$pvalue < 0.05 & abs(c_res_df$log2FoldChange) > 1,]
+```
+
+
+``` {r New Model Update: UT D18 + T NS D18 Samples with DEGs from all 17}
+# The "new" model was originally based on DEGs found between all UT samples. Now, we use DEGs found between all 17 samples (including the T NS samples) in the new model. 
+
+set.seed(7823)
+
+# --- Build combined training matrix ---
+# Filter to combined DEG features
+x_comb <- t(as.matrix(comb_samples)) 
+x_comb_deg <- x_comb[,colnames(x_comb) %in% rownames(c_deg_genes), drop = FALSE]
+
+y_comb <- factor(comb_coldata$condition)
+
+cat("Combined training set:\n")
+print(table(y_comb))
+cat("Feature count:", ncol(x_comb_deg), "\n\n")
+
+# --- LOOCV on combined training set ---
+n_comb2         <- nrow(x_comb_deg)
+gene_freq_comb2 <- setNames(rep(0L, ncol(x_comb_deg)), colnames(x_comb_deg))
+gene_list_comb2 <- vector("list", n_comb2)
+accuracy_comb2  <- rep(NA_real_, n_comb2)
+
+for (i in seq_len(n_comb2)) {
+  x_tr2 <- x_comb_deg[-i, , drop = FALSE]
+  y_tr2 <- y_comb[-i]
+  x_lo2 <- x_comb_deg[i,  , drop = FALSE]
+  y_lo2 <- y_comb[i]
+
+  # Recompute weights per fold so they reflect the actual training class counts
+  n_ns_tr2 <- sum(y_tr2 == "NS")
+  n_s_tr2  <- sum(y_tr2 == "S")
+  w_tr2    <- ifelse(y_tr2 == "NS", 1 / n_ns_tr2, 1 / n_s_tr2)
+
+  cvfit_c2 <- cv.glmnet(x_tr2, y_tr2,
+                       weights      = w_tr2,
+                       family       = "binomial",
+                       alpha        = 0.5,
+                       nfolds       = nrow(x_tr2), # LOOCV for small n
+                       type.measure = "class")
+
+  coef_c2     <- coef(cvfit_c2, s = "lambda.1se")
+  selected_c2 <- rownames(coef_c2)[coef_c2[, 1] != 0 & rownames(coef_c2) != "(Intercept)"]
+  gene_list_comb2[[i]] <- selected_c2
+  gene_freq_comb2[selected_c2] <- gene_freq_comb2[selected_c2] + 1L
+
+  pred_c2        <- predict(cvfit_c2, x_lo2, s = "lambda.1se", type = "class")[, 1]
+  accuracy_comb2[i] <- as.integer(pred_c2 == as.character(y_lo2))
+}
+
+# Gene selection frequency
+gene_freq_comb_df2 <- data.frame(
+  gene         = names(gene_freq_comb2),
+  n_selected   = as.integer(gene_freq_comb2),
+  pct_selected = round(as.integer(gene_freq_comb2) / n_comb2 * 100, 1)
+) |> dplyr::arrange(desc(n_selected))
+
+# Signature: genes selected in >= 60% of LOOCV runs
+signature_genes_comb2 <- gene_freq_comb_df2$gene[gene_freq_comb_df2$pct_selected >= 60]
+
+# Per-sample LOOCV results
+loocv_comb_df2 <- data.frame(
+  sample  = rownames(x_comb_deg),
+  true    = as.character(y_comb),
+  correct = accuracy_comb2
+)
+
+cat("=== Combined LOOCV Results ===\n")
+cat("Overall accuracy:", round(sum(accuracy_comb2) / n_comb2 * 100, 1), "%\n")
+cat("NS accuracy:     ", round(mean(accuracy_comb2[y_comb == "NS"]) * 100, 1), "%\n")
+cat("S  accuracy:     ", round(mean(accuracy_comb2[y_comb == "S"])  * 100, 1), "%\n\n")
+print(loocv_comb_df2)
+cat("\nSignature size (>= 60% selection frequency):", length(signature_genes_comb2), "\n")
+print(signature_genes_comb2)
+
+# --- Retrain final model on all 17 combined samples ---
+x_comb_sig2 <- x_comb[, colnames(x_comb) %in% signature_genes_comb2, drop = FALSE]
+
+# Weights inversely proportional to class frequency to correct for 11 NS vs 6 S imbalance
+n_ns2 <- sum(y_comb == "NS")
+n_s2  <- sum(y_comb == "S")
+w_combined2 <- ifelse(y_comb == "NS", 1 / n_ns2, 1 / n_s2)
+
+final_fit_comb2 <- cv.glmnet(x_comb_sig2, y_comb,
+                             weights      = w_combined2,
+                             family       = "binomial",
+                             alpha        = 0.5,
+                             nfolds       = nrow(x_comb_sig2),
+                             type.measure = "class")
+
+# Apply to T S samples only (T NS were part of the training set)
+x_t_s_sig2 <- x_t[t_s_idx, colnames(x_t) %in% signature_genes_comb2, drop = FALSE]
+
+T_S_pred_class2 <- predict(final_fit_comb2, x_t_s_sig2, s = "lambda.1se", type = "class")[, 1]
+T_S_pred_prob2  <- predict(final_fit_comb2, x_t_s_sig2, s = "lambda.1se", type = "response")[, 1]
+
+T_S_pred_df2 <- data.frame(
+  sample    = rownames(x_t_s_sig2),
+  predicted = T_S_pred_class2,
+  prob_S    = round(T_S_pred_prob2, 3)
+)
+
+cat("\n=== Predictions for T Survivor Samples ===\n")
+cat("(T NS samples were in training — see LOOCV above for their performance)\n\n")
+print(T_S_pred_df2)
+
+# T S mice predicted as NS = mice whose D18 profile looked like NS but survived -> NP benefit
+np_benefit_comb2 <- sum(T_S_pred_class2 == "NS") / nrow(T_S_pred_df2)
+cat("\nT S mice predicted as NS (potential NP benefit):",
+    sum(T_S_pred_class2 == "NS"), "/", nrow(T_S_pred_df2),
+    paste0("(", round(np_benefit_comb2 * 100, 1), "%)\n"))
+
+```
+
+
+```{r Heatmap of Combined (UT + T NS) D18 Signature}
+# Pull VST-normalized counts from DESeq2 object for clean visualization
+vst_mat_c <- assay(vst(c_dds))
+
+# Subset to signature genes and combined samples
+heat_mat_c <- vst_mat_c[signature_genes_comb2, colnames(comb_samples)]
+
+# Annotation bar for condition
+anno_col_c <- data.frame(Condition = comb_coldata$condition, row.names = rownames(comb_coldata))
+
+pheatmap(heat_mat_c,
+         annotation_col  = anno_col_c,
+         scale           = "row",
+         cluster_cols    = TRUE,
+         cluster_rows    = TRUE,
+         show_colnames   = TRUE,
+         fontsize_row    = 10,
+         main            = "Signature Genes — UT D18 & T NS D18 Samples")
+
+```
+
+```{r PCA Plot of 17-Sample Signature from 17-Sample DEGs}
+ggbiplot(prcomp(t(heat_mat_c), scale.=T), 
+         choices = c(1,2),
+         ellipse=T, groups=comb_coldata$condition,
+         var.axes=T, var.scale=1) + 
+  theme_classic() + 
+  ggtitle("PCA Plot - 17-Sample Signature from 17-Sample DEGs") 
+
+```
+
+# Signature Application - T D18 to T W2 and T W4
+
+```{r Apply T D18 Signature to T W2 Samples}
+# Retrain a final model on T D18 samples using only the T signature genes
+T_D18_signature_genes <- x_t[, colnames(x_t) %in% T_signature_genes, drop = FALSE]
+
+T_D18_final_fit <- cv.glmnet(T_D18_signature_genes, y_t,
+                           family       = "binomial",
+                           alpha        = 0.5,
+                           nfolds       = nrow(T_D18_signature_genes),  # LOOCV
+                           type.measure = "class")
+
+# Subset T W2 samples to the same signature genes
+T_W2 <- data_filt1 %>% dplyr::select(matches("^T_(S|NS).*_W2$"))
+T_W2 <- round(T_W2,0) # Make all counts integers
+T_W2 <- t(T_W2) # samples x genes
+
+T_W2_shared_genes  <- intersect(T_signature_genes, colnames(T_W2))
+T_W2_D18sig        <- T_W2[, T_W2_shared_genes, drop = FALSE]
+
+# Predict S vs NS in T W2 samples
+T_W2_pred_class <- predict(T_D18_final_fit, T_W2_D18sig, s = "lambda.1se", type = "class")[, 1]
+T_W2_pred_prob  <- predict(T_D18_final_fit, T_W2_D18sig, s = "lambda.1se", type = "response")[, 1]
+
+# Accuracy against known T W2 labels
+# Second dataframe with the condition for each T W2 sample
+T_W2_coldata <- data.frame(row.names = rownames(T_W2), 
+                      condition = ifelse(grepl("T_S", rownames(T_W2)), "S", "NS"))
+T_W2_coldata$condition <- factor(T_W2_coldata$condition, levels = c("NS", "S")) # NS is the baseline
+
+T_W2_pred_correct <- as.integer(T_W2_pred_class == as.character(T_W2_coldata$condition))
+
+T_W2_pred_df <- data.frame(sample    = rownames(T_W2_D18sig),
+                        true      = as.character(T_W2_coldata$condition),
+                        predicted = T_W2_pred_class,
+                        prob_S    = round(T_W2_pred_prob, 3),
+                        correct   = T_W2_pred_correct)
+
+cat("Predicted classes (T W2 samples):\n")
+print(T_W2_pred_df)
+cat("\nAccuracy of T D18 signature on T W2 samples:", round(mean(T_W2_pred_correct) * 100, 1), "%\n")
+
+```
+
+```{r Apply T D18 Signature to T W4 Samples}
+# Subset T W4 samples to the same signature genes
+T_W4 <- data_filt1 %>% dplyr::select(matches("^T_(S|NS).*_W4$"))
+T_W4 <- round(T_W4,0) # Make all counts integers
+T_W4 <- t(T_W4) # samples x genes
+
+T_W4_shared_genes  <- intersect(T_signature_genes, colnames(T_W4))
+T_W4_D18sig        <- T_W4[, T_W4_shared_genes, drop = FALSE]
+
+# Predict S vs NS in T W4 samples
+T_W4_pred_class <- predict(T_D18_final_fit, T_W4_D18sig, s = "lambda.1se", type = "class")[, 1]
+T_W4_pred_prob  <- predict(T_D18_final_fit, T_W4_D18sig, s = "lambda.1se", type = "response")[, 1]
+
+# Accuracy against known T W4 labels
+# Second dataframe with the condition for each T W4 sample
+T_W4_coldata <- data.frame(row.names = rownames(T_W4), 
+                      condition = ifelse(grepl("T_S", rownames(T_W4)), "S", "NS"))
+T_W4_coldata$condition <- factor(T_W4_coldata$condition, levels = c("NS", "S")) # NS is the baseline
+
+T_W4_pred_correct <- as.integer(T_W4_pred_class == as.character(T_W4_coldata$condition))
+
+T_W4_pred_df <- data.frame(sample    = rownames(T_W4_D18sig),
+                        true      = as.character(T_W4_coldata$condition),
+                        predicted = T_W4_pred_class,
+                        prob_S    = round(T_W4_pred_prob, 3),
+                        correct   = T_W4_pred_correct)
+
+cat("Predicted classes (T W4 samples):\n")
+print(T_W4_pred_df)
+cat("\nAccuracy of T D18 signature on T W4 samples:", round(mean(T_W4_pred_correct) * 100, 1), "%\n")
+
+```
+
+# Signature Application - 17-Sample to W2 and W4
+
+```{r Apply 17-Sample Signature to W2 Samples}
+# Subset W2 samples to the same signature genes
+all_W2 <- data_filt1 %>% dplyr::select(matches("_W2$"))
+all_W2 <- round(all_W2,0) # Make all counts integers
+all_W2 <- t(all_W2) # samples x genes
+
+all_W2_shared_genes  <- intersect(signature_genes_comb2, colnames(all_W2))
+all_W2_comb_sig      <- all_W2[, all_W2_shared_genes, drop = FALSE]
+
+# Predict S vs NS in W2 samples
+all_W2_pred_class <- predict(final_fit_comb2, all_W2_comb_sig, s = "lambda.1se", type = "class")[, 1]
+all_W2_pred_prob  <- predict(final_fit_comb2, all_W2_comb_sig, s = "lambda.1se", type = "response")[, 1]
+
+# Accuracy against known W2 labels
+# Second dataframe with the condition for each W2 sample
+all_W2_coldata <- data.frame(row.names = rownames(all_W2), 
+                      condition = ifelse(grepl("T_S", rownames(all_W2)), "S", "NS"))
+all_W2_coldata$condition <- factor(all_W2_coldata$condition, levels = c("NS", "S")) # NS is the baseline
+
+all_W2_pred_correct <- as.integer(all_W2_pred_class == as.character(all_W2_coldata$condition))
+
+all_W2_pred_df <- data.frame(sample    = rownames(all_W2_comb_sig),
+                        true      = as.character(all_W2_coldata$condition),
+                        predicted = all_W2_pred_class,
+                        prob_S    = round(all_W2_pred_prob, 3),
+                        correct   = all_W2_pred_correct)
+
+cat("Predicted classes (W2 samples):\n")
+print(all_W2_pred_df)
+cat("\nAccuracy of 17-Sample D18 signature on W2 samples:", round(mean(all_W2_pred_correct) * 100, 1), "%\n")
+
+```
+
+```{r Apply 17-Sample Signature to W4 Samples}
+# Subset W4 samples to the same signature genes
+all_W4 <- data_filt1 %>% dplyr::select(matches("_W4$"))
+all_W4 <- round(all_W4,0) # Make all counts integers
+all_W4 <- t(all_W4) # samples x genes
+
+all_W4_shared_genes  <- intersect(signature_genes_comb2, colnames(all_W4))
+all_W4_comb_sig      <- all_W4[, all_W4_shared_genes, drop = FALSE]
+
+# Predict S vs NS in W4 samples
+all_W4_pred_class <- predict(final_fit_comb2, all_W4_comb_sig, s = "lambda.1se", type = "class")[, 1]
+all_W4_pred_prob  <- predict(final_fit_comb2, all_W4_comb_sig, s = "lambda.1se", type = "response")[, 1]
+
+# Accuracy against known W4 labels
+# Second dataframe with the condition for each W4 sample
+all_W4_coldata <- data.frame(row.names = rownames(all_W4), 
+                      condition = ifelse(grepl("T_S", rownames(all_W4)), "S", "NS"))
+all_W4_coldata$condition <- factor(all_W4_coldata$condition, levels = c("NS", "S")) # NS is the baseline
+
+all_W4_pred_correct <- as.integer(all_W4_pred_class == as.character(all_W4_coldata$condition))
+
+all_W4_pred_df <- data.frame(sample    = rownames(all_W4_comb_sig),
+                        true      = as.character(all_W4_coldata$condition),
+                        predicted = all_W4_pred_class,
+                        prob_S    = round(all_W4_pred_prob, 3),
+                        correct   = all_W4_pred_correct)
+
+cat("Predicted classes (W4 samples):\n")
+print(all_W4_pred_df)
+cat("\nAccuracy of 17-Sample D18 signature on W4 samples:", round(mean(all_W4_pred_correct) * 100, 1), "%\n")
+
+```
+
+# T W2 Signature Generation
+
+```{r DESeq2 - T W2}
+# Subset T samples from W2
+T_W2 <- data_filt1 %>% dplyr::select(matches("^T_(S|NS).*_W2$"))
+T_W2 <- round(T_W2, 0) # Make all counts integers
+
+# Second dataframe with the condition for each T W2 sample
+T_W2_coldata <- data.frame(row.names = colnames(T_W2), 
+                      condition = ifelse(grepl("T_S", colnames(T_W2)), "S", "NS"))
+
+# Set the condition as a factor (a datatype) and list NS first so it's the baseline comparison, which is more intuitive
+T_W2_coldata$condition <- factor(T_W2_coldata$condition, levels = c("NS", "S"))
+
+T_W2_dds <- DESeqDataSetFromMatrix(
+  countData = T_W2,
+  colData = T_W2_coldata,
+  design = ~ condition)
+
+T_W2_dds <- T_W2_dds[rowSums(counts(T_W2_dds)) > 10, ]
+
+T_W2_dds <- DESeq(T_W2_dds)
+
+resultsNames(T_W2_dds)
+T_W2_res <- results(T_W2_dds, pAdjustMethod = "none")
+
+summary(T_W2_res)
+
+# Order by adjusted p-value, which is the same as the p-value if the pAdjustMethod = none above
+T_W2_res_ordered <- T_W2_res[order(T_W2_res$padj), ]
+view(T_W2_res_ordered %>% data.frame())
+
+# Shrink log2FC
+T_W2_resLFC <- lfcShrink(T_W2_dds, coef="condition_S_vs_NS", type="apeglm")
+
+# Visualize!
+T_W2_res_df <- as.data.frame(T_W2_res)
+
+ggplot(T_W2_res_df, aes(x=log2FoldChange, y=-log10(padj))) +
+  geom_point(alpha=0.5) +
+  theme_minimal() + 
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_vline(xintercept = -1) + 
+  geom_vline(xintercept = 1) +
+  xlim(-6,5)
+
+LFc = 1 #logfold change cutoff for DEGs
+pc = 0.05 #pvalue cutoff for DEGs
+
+# Subset results by log2FC > |1| and pval < 0.1 
+upT_S_W2 <- T_W2_res_df[!is.na(T_W2_res_df$pvalue) & T_W2_res_df$pvalue < 0.05 & T_W2_res_df$log2FoldChange > 1,]
+dnT_S_W2 <- T_W2_res_df[!is.na(T_W2_res_df$pvalue) & T_W2_res_df$pvalue < 0.05 & T_W2_res_df$log2FoldChange < -1,]
+degT_W2 <- T_W2_res_df[!is.na(T_W2_res_df$pvalue) & T_W2_res_df$pvalue < 0.05 & abs(T_W2_res_df$log2FoldChange) > 1,]
+
+```
+
+``` {r Elastic Net Signature Generation - T W2}
+set.seed(7823)
+
+# --- Build T W2 training matrix ---
+# Filter to just DEGs to improve the model
+x_T_W2 <- t(as.matrix(T_W2)) # now: 12 x genes
+T_W2_deg_genes <- rownames(degT_W2)
+x_T_W2_deg <- x_T_W2[, colnames(x_T_W2) %in% T_W2_deg_genes, drop = FALSE]
+
+y_T_W2 <- T_W2_coldata$condition # factor: "NS" (reference) vs "S"
+
+n_T_W2 <- nrow(x_T_W2_deg)
+
+cat("Combined training set:\n")
+print(table(y_T_W2))
+cat("Feature count:", ncol(x_T_W2_deg), "\n\n")
+
+# --- LOOCV on combined training set ---
+n_T_W2         <- nrow(x_T_W2_deg)
+gene_freq_T_W2 <- setNames(rep(0L, ncol(x_T_W2_deg)), colnames(x_T_W2_deg))
+gene_list_T_W2 <- vector("list", n_T_W2)
+accuracy_T_W2  <- rep(NA_real_, n_T_W2)
+
+for (i in seq_len(n_T_W2)) {
+  x_tr <- x_T_W2_deg[-i, , drop = FALSE]
+  y_tr <- y_T_W2[-i]
+  x_lo <- x_T_W2_deg[i,  , drop = FALSE]
+  y_lo <- y_T_W2[i]
+
+  # Recompute weights per fold so they reflect the actual training class counts
+  n_ns_tr <- sum(y_tr == "NS")
+  n_s_tr  <- sum(y_tr == "S")
+  w_tr    <- ifelse(y_tr == "NS", 1 / n_ns_tr, 1 / n_s_tr)
+
+  cvfit_T_W2 <- cv.glmnet(x_tr, y_tr,
+                       weights      = w_tr,
+                       family       = "binomial",
+                       alpha        = 0.5,
+                       nfolds       = nrow(x_tr), # LOOCV for small n
+                       type.measure = "class")
+
+  coef_T_W2     <- coef(cvfit_T_W2, s = "lambda.1se")
+  selected_T_W2 <- rownames(coef_T_W2)[coef_T_W2[, 1] != 0 & rownames(coef_T_W2) != "(Intercept)"]
+  gene_list_T_W2[[i]] <- selected_T_W2
+  gene_freq_T_W2[selected_T_W2] <- gene_freq_T_W2[selected_T_W2] + 1L
+
+  pred_T_W2        <- predict(cvfit_T_W2, x_lo, s = "lambda.1se", type = "class")[, 1]
+  accuracy_T_W2[i] <- as.integer(pred_T_W2 == as.character(y_lo))
+}
+
+# Gene selection frequency
+gene_freq_T_W2_df <- data.frame(
+  gene         = names(gene_freq_T_W2),
+  n_selected   = as.integer(gene_freq_T_W2),
+  pct_selected = round(as.integer(gene_freq_T_W2) / n_T_W2 * 100, 1)
+) |> dplyr::arrange(desc(n_selected))
+
+# Signature: genes selected in >= 60% of LOOCV runs
+signature_genes_T_W2 <- gene_freq_T_W2_df$gene[gene_freq_T_W2_df$pct_selected >= 60]
+
+# Per-sample LOOCV results
+loocv_T_W2_df <- data.frame(
+  sample  = rownames(x_T_W2_deg),
+  true    = as.character(y_T_W2),
+  correct = accuracy_T_W2
+)
+
+cat("=== Combined LOOCV Results ===\n")
+cat("Overall accuracy:", round(sum(accuracy_T_W2) / n_T_W2 * 100, 1), "%\n")
+cat("NS accuracy:     ", round(mean(accuracy_T_W2[y_T_W2 == "NS"]) * 100, 1), "%\n")
+cat("S  accuracy:     ", round(mean(accuracy_T_W2[y_T_W2 == "S"])  * 100, 1), "%\n\n")
+print(loocv_T_W2_df)
+cat("\nSignature size (>= 60% selection frequency):", length(signature_genes_T_W2), "\n")
+print(signature_genes_T_W2)
+
+# --- Retrain final model on all amples ---
+x_T_W2_sig <- x_T_W2_deg[, colnames(x_T_W2_deg) %in% signature_genes_T_W2, drop = FALSE]
+
+# Weights inversely proportional to class frequency to correct for 5 NS vs 9 S imbalance
+n_ns <- sum(y_T_W2 == "NS")
+n_s  <- sum(y_T_W2 == "S")
+w_T_W2 <- ifelse(y_T_W2 == "NS", 1 / n_ns, 1 / n_s)
+
+final_fit_T_W2 <- cv.glmnet(x_T_W2_sig, y_T_W2,
+                             weights      = w_T_W2,
+                             family       = "binomial",
+                             alpha        = 0.5,
+                             nfolds       = nrow(x_T_W2_sig),
+                             type.measure = "class")
+
+```
+
+```{r Heatmap of T W2 Signature}
+# Pull VST-normalized counts from DESeq2 object for clean visualization
+vst_mat_T_W2 <- assay(vst(T_W2_dds))
+
+# Subset to signature genes and UT samples
+heat_mat_T_W2 <- vst_mat_T_W2[signature_genes_T_W2, colnames(T_W2)]
+
+# Annotation bar for condition
+anno_col_T_W2 <- data.frame(Condition = T_W2_coldata$condition, row.names = rownames(T_W2_coldata))
+
+pheatmap(heat_mat_T_W2,
+         annotation_col  = anno_col_T_W2,
+         scale           = "row",
+         cluster_cols    = TRUE,
+         cluster_rows    = TRUE,
+         show_colnames   = TRUE,
+         fontsize_row    = 10,
+         main            = "Signature Genes — T W2 Samples")
+
+```
+
+# Signature Application - T W2 to T D18 and T W4
+
+```{r Apply T W2 Signature to T D18 Samples}
+# Subset T D18 samples to the same signature genes
+T_D18 <- t(T_SandNS_D18) # samples x genes
+
+T_D18_shared_genes  <- intersect(signature_genes_T_W2, colnames(T_D18))
+T_D18_sig      <- T_D18[, T_D18_shared_genes, drop = FALSE]
+
+# Predict S vs NS in T D18 samples
+T_D18_pred_class <- predict(final_fit_T_W2, T_D18_sig, s = "lambda.1se", type = "class")[, 1]
+T_D18_pred_prob  <- predict(final_fit_T_W2, T_D18_sig, s = "lambda.1se", type = "response")[, 1]
+
+# Accuracy against known D18 labels
+T_D18_pred_correct <- as.integer(T_D18_pred_class == as.character(T_coldata$condition))
+
+T_D18_pred_df <- data.frame(sample    = rownames(T_D18_sig),
+                        true      = as.character(T_coldata$condition),
+                        predicted = T_D18_pred_class,
+                        prob_S    = round(T_D18_pred_prob, 3),
+                        correct   = T_D18_pred_correct)
+
+cat("Predicted classes (T D18 samples):\n")
+print(T_D18_pred_df)
+cat("\nAccuracy of T W2 signature on T D18 samples:", round(mean(T_D18_pred_correct) * 100, 1), "%\n")
+
+```
+
+```{r Apply T W2 Signature to T W4 Samples}
+T_W4_shared_genes2  <- intersect(signature_genes_T_W2, colnames(T_W4))
+T_W4_W2sig       <- T_W4[, T_W4_shared_genes2, drop = FALSE]
+
+# Predict S vs NS in T W4 samples
+T_W4_pred_class2 <- predict(final_fit_T_W2, T_W4_W2sig, s = "lambda.1se", type = "class")[, 1]
+T_W4_pred_prob2  <- predict(final_fit_T_W2, T_W4_W2sig, s = "lambda.1se", type = "response")[, 1]
+
+# Accuracy against known T W4 labels
+T_W4_pred_correct2 <- as.integer(T_W4_pred_class2 == as.character(T_W4_coldata$condition))
+
+T_W4_pred_df2 <- data.frame(sample    = rownames(T_W4_W2sig),
+                        true      = as.character(T_W4_coldata$condition),
+                        predicted = T_W4_pred_class2,
+                        prob_S    = round(T_W4_pred_prob2, 3),
+                        correct   = T_W4_pred_correct2)
+
+cat("Predicted classes (T W4 samples):\n")
+print(T_W4_pred_df2)
+cat("\nAccuracy of T W2 signature on T W4 samples:", round(mean(T_W4_pred_correct2) * 100, 1), "%\n")
+
+```
+
+
+# W2-Specific Signature: Stratifies T S vs T NS Across Timepoints
+
+```{r Claude W2-Specific Signature Generation}
+# Strategy: use W2 DEGs that are NOT present in D18 DEGs.
+# These genes distinguish S from NS at W2 but are not significantly different at D18,
+# so applying the model back to D18 should yield overlapping scores.
+
+w2_specific_genes <- setdiff(rownames(degT_W2), rownames(degT_D18))
+cat("W2-specific DEGs (not in D18 DEGs):", length(w2_specific_genes), "\n")
+
+# Build W2 training matrix restricted to W2-specific genes
+x_T_W2_specific <- x_T_W2[, colnames(x_T_W2) %in% w2_specific_genes, drop = FALSE]
+y_T_W2 <- T_W2_coldata$condition  # factor: "NS" (reference) vs "S"
+
+# ── LOOCV ───────────────────────────────────────────────────────────────────
+set.seed(4521)
+n_W2spec <- nrow(x_T_W2_specific)
+
+gene_freq_W2spec <- setNames(rep(0L, ncol(x_T_W2_specific)), colnames(x_T_W2_specific))
+
+loocv_W2spec <- data.frame(
+  sample    = rownames(x_T_W2_specific),
+  true      = as.character(y_T_W2),
+  predicted = NA_character_,
+  prob_S    = NA_real_,
+  correct   = NA_integer_,
+  stringsAsFactors = FALSE
+)
+
+for (i in seq_len(n_W2spec)) {
+  x_tr <- x_T_W2_specific[-i, , drop = FALSE]
+  y_tr <- y_T_W2[-i]
+  x_te <- x_T_W2_specific[i, , drop = FALSE]
+  n_ns_tr <- sum(y_tr == "NS"); n_s_tr <- sum(y_tr == "S")
+  w_tr <- ifelse(y_tr == "NS", 1/n_ns_tr, 1/n_s_tr)
+  fit_i <- cv.glmnet(x_tr, y_tr, weights = w_tr,
+                     family = "binomial", alpha = 0.5,
+                     nfolds = length(y_tr), type.measure = "class")
+  loocv_W2spec$predicted[i] <- predict(fit_i, x_te, s = "lambda.1se", type = "class")[1]
+  loocv_W2spec$prob_S[i]    <- round(predict(fit_i, x_te, s = "lambda.1se", type = "response")[1], 3)
+  loocv_W2spec$correct[i]   <- as.integer(loocv_W2spec$predicted[i] == as.character(y_T_W2[i]))
+  # Track which genes were selected in this fold
+  selected_W2spec <- names(which(coef(fit_i, s = "lambda.1se")[-1, 1] != 0))
+  gene_freq_W2spec[selected_W2spec] <- gene_freq_W2spec[selected_W2spec] + 1L
+}
+
+cat("=== LOOCV Results ===\n")
+cat("Overall accuracy:", round(mean(loocv_W2spec$correct) * 100, 1), "%\n")
+cat("NS accuracy:     ", round(mean(loocv_W2spec$correct[loocv_W2spec$true == "NS"]) * 100, 1), "%\n")
+cat("S  accuracy:     ", round(mean(loocv_W2spec$correct[loocv_W2spec$true == "S"]) * 100, 1), "%\n\n")
+print(loocv_W2spec)
+
+# Gene selection frequency
+gene_freq_W2spec_df <- data.frame(
+  gene         = names(gene_freq_W2spec),
+  n_selected   = as.integer(gene_freq_W2spec),
+  pct_selected = round(as.integer(gene_freq_W2spec) / n_W2spec * 100, 1)
+) |> dplyr::arrange(desc(pct_selected))
+
+sig_genes_W2spec <- gene_freq_W2spec_df$gene[gene_freq_W2spec_df$pct_selected >= 60]
+cat("\nSignature size (>= 60% selection frequency):", length(sig_genes_W2spec), "\n")
+print(sig_genes_W2spec)
+
+# ── Retrain final model on frequency-selected genes ──────────────────────────
+x_W2spec_sig <- x_T_W2_specific[, colnames(x_T_W2_specific) %in% sig_genes_W2spec, drop = FALSE]
+
+n_ns <- sum(y_T_W2 == "NS"); n_s <- sum(y_T_W2 == "S")
+w_final <- ifelse(y_T_W2 == "NS", 1/n_ns, 1/n_s)
+
+final_fit_W2spec <- cv.glmnet(x_W2spec_sig, y_T_W2,
+                               weights      = w_final,
+                               family       = "binomial",
+                               alpha        = 0.5,
+                               nfolds       = nrow(x_W2spec_sig),
+                               type.measure = "class")
+```
+
+```{r Claude W2-Specific Signature Applied Across Timepoints}
+# Apply final model to D18, W2, and W4 samples and plot prob_S trajectories
+
+# D18
+D18_shared    <- intersect(sig_genes_W2spec, colnames(T_D18))
+D18_prob      <- predict(final_fit_W2spec, T_D18[, D18_shared, drop = FALSE],
+                         s = "lambda.1se", type = "response")[, 1]
+
+# W2 (scored by final model for consistency)
+W2_shared     <- intersect(sig_genes_W2spec, colnames(x_T_W2))
+W2_prob       <- predict(final_fit_W2spec, x_T_W2[, W2_shared, drop = FALSE],
+                         s = "lambda.1se", type = "response")[, 1]
+
+# W4
+W4_shared     <- intersect(sig_genes_W2spec, colnames(T_W4))
+W4_prob       <- predict(final_fit_W2spec, T_W4[, W4_shared, drop = FALSE],
+                         s = "lambda.1se", type = "response")[, 1]
+
+# Combine
+df_W2spec_traj <- rbind(
+  data.frame(sample = names(D18_prob), timepoint = "D18",
+             condition = as.character(T_coldata$condition),    prob_S = as.numeric(D18_prob)),
+  data.frame(sample = names(W2_prob),  timepoint = "W2",
+             condition = as.character(T_W2_coldata$condition), prob_S = as.numeric(W2_prob)),
+  data.frame(sample = names(W4_prob),  timepoint = "W4",
+             condition = as.character(T_W4_coldata$condition), prob_S = as.numeric(W4_prob))
+)
+df_W2spec_traj$timepoint <- factor(df_W2spec_traj$timepoint, levels = c("D18", "W2", "W4"))
+df_W2spec_traj$subject   <- sub("_(D18|W2|W4)$", "", df_W2spec_traj$sample)
+
+# Group means for bolded summary lines
+df_W2spec_summary <- aggregate(prob_S ~ timepoint + condition, data = df_W2spec_traj, FUN = mean)
+
+ggplot(df_W2spec_traj, aes(x = timepoint, y = prob_S, color = condition)) +
+  geom_line(aes(group = subject), alpha = 0.35, linewidth = 0.6) +
+  geom_point(size = 2.5, alpha = 0.8) +
+  geom_line(data = df_W2spec_summary, aes(group = condition), linewidth = 1.5) +
+  geom_point(data = df_W2spec_summary, size = 4, shape = 18) +
+  scale_color_manual(values = c("NS" = "#2171B5", "S" = "#CB181D"),
+                     labels = c("NS" = "T NS", "S" = "T S")) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50") +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+  labs(title = "W2-Specific Signature Score Over Time",
+       subtitle = "Trained on W2 DEGs not present at D18",
+       x = "Timepoint", y = "P(Sensitized)", color = "Condition") +
+  theme_classic(base_size = 13)
+```
+
+# T W4 Signature Generation
+
+```{r DESeq2 - T W4}
+T_W4_dds <- DESeqDataSetFromMatrix(
+  countData = t(T_W4),
+  colData = T_W4_coldata,
+  design = ~ condition)
+
+T_W4_dds <- T_W4_dds[rowSums(counts(T_W4_dds)) > 10, ]
+
+T_W4_dds <- DESeq(T_W4_dds)
+
+resultsNames(T_W4_dds)
+T_W4_res <- results(T_W4_dds, pAdjustMethod = "none")
+
+summary(T_W4_res)
+
+# Order by adjusted p-value, which is the same as the p-value if the pAdjustMethod = none above
+T_W4_res_ordered <- T_W4_res[order(T_W4_res$padj), ]
+view(T_W4_res_ordered %>% data.frame())
+
+# Shrink log2FC
+T_W4_resLFC <- lfcShrink(T_W4_dds, coef="condition_S_vs_NS", type="apeglm")
+
+# Visualize!
+T_W4_res_df <- as.data.frame(T_W4_res)
+
+ggplot(T_W4_res_df, aes(x=log2FoldChange, y=-log10(padj))) +
+  geom_point(alpha=0.5) +
+  theme_minimal() + 
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_vline(xintercept = -1) + 
+  geom_vline(xintercept = 1) +
+  xlim(-6,5)
+
+LFc = 1 #logfold change cutoff for DEGs
+pc = 0.05 #pvalue cutoff for DEGs
+
+# Subset results by log2FC > |1| and pval < 0.1 
+upT_W4 <- T_W4_res_df[!is.na(T_W4_res_df$pvalue) & T_W4_res_df$pvalue < 0.05 & T_W4_res_df$log2FoldChange > 1,]
+dnT_S_W4 <- T_W4_res_df[!is.na(T_W4_res_df$pvalue) & T_W4_res_df$pvalue < 0.05 & T_W4_res_df$log2FoldChange < -1,]
+degT_W4<- T_W4_res_df[!is.na(T_W4_res_df$pvalue) & T_W4_res_df$pvalue < 0.05 & abs(T_W4_res_df$log2FoldChange) > 1,]
+
+```
+
+
+
+``` {r Elastic Net Signature Generation - T W4}
+set.seed(7823)
+
+# --- Build T W4 training matrix ---
+# Filter to just DEGs to improve the model
+x_T_W4 <- as.matrix(T_W4) # now: samples x genes
+T_W4_deg_genes <- rownames(degT_W4)
+x_T_W4_deg <- x_T_W4[, colnames(x_T_W4) %in% T_W4_deg_genes, drop = FALSE]
+
+y_T_W4 <- T_W4_coldata$condition # factor: "NS" (reference) vs "S"
+
+n_T_W4 <- nrow(x_T_W4_deg)
+
+cat("Combined training set:\n")
+print(table(y_T_W4))
+cat("Feature count:", ncol(x_T_W4_deg), "\n\n")
+
+# --- LOOCV on combined training set ---
+n_T_W4         <- nrow(x_T_W4_deg)
+gene_freq_T_W4 <- setNames(rep(0L, ncol(x_T_W4_deg)), colnames(x_T_W4_deg))
+gene_list_T_W4 <- vector("list", n_T_W4)
+accuracy_T_W4  <- rep(NA_real_, n_T_W4)
+
+for (i in seq_len(n_T_W4)) {
+  x_tr <- x_T_W4_deg[-i, , drop = FALSE]
+  y_tr <- y_T_W4[-i]
+  x_lo <- x_T_W4_deg[i,  , drop = FALSE]
+  y_lo <- y_T_W4[i]
+
+  # Recompute weights per fold so they reflect the actual training class counts
+  n_ns_tr <- sum(y_tr == "NS")
+  n_s_tr  <- sum(y_tr == "S")
+  w_tr    <- ifelse(y_tr == "NS", 1 / n_ns_tr, 1 / n_s_tr)
+
+  cvfit_T_W4 <- cv.glmnet(x_tr, y_tr,
+                       weights      = w_tr,
+                       family       = "binomial",
+                       alpha        = 0.5,
+                       nfolds       = nrow(x_tr), # LOOCV for small n
+                       type.measure = "class")
+
+  coef_T_W4     <- coef(cvfit_T_W4, s = "lambda.1se")
+  selected_T_W4 <- rownames(coef_T_W4)[coef_T_W4[, 1] != 0 & rownames(coef_T_W4) != "(Intercept)"]
+  gene_list_T_W4[[i]] <- selected_T_W4
+  gene_freq_T_W4[selected_T_W4] <- gene_freq_T_W4[selected_T_W4] + 1L
+
+  pred_T_W4        <- predict(cvfit_T_W4, x_lo, s = "lambda.1se", type = "class")[, 1]
+  accuracy_T_W4[i] <- as.integer(pred_T_W4 == as.character(y_lo))
+}
+
+# Gene selection frequency
+gene_freq_T_W4_df <- data.frame(
+  gene         = names(gene_freq_T_W4),
+  n_selected   = as.integer(gene_freq_T_W4),
+  pct_selected = round(as.integer(gene_freq_T_W4) / n_T_W4 * 100, 1)
+) |> dplyr::arrange(desc(n_selected))
+
+# Signature: genes selected in >= 60% of LOOCV runs
+signature_genes_T_W4 <- gene_freq_T_W4_df$gene[gene_freq_T_W4_df$pct_selected >= 60]
+
+# Per-sample LOOCV results
+loocv_T_W4_df <- data.frame(
+  sample  = rownames(x_T_W4_deg),
+  true    = as.character(y_T_W4),
+  correct = accuracy_T_W4
+)
+
+cat("=== Combined LOOCV Results ===\n")
+cat("Overall accuracy:", round(sum(accuracy_T_W4) / n_T_W4 * 100, 1), "%\n")
+cat("NS accuracy:     ", round(mean(accuracy_T_W4[y_T_W4 == "NS"]) * 100, 1), "%\n")
+cat("S  accuracy:     ", round(mean(accuracy_T_W4[y_T_W4 == "S"])  * 100, 1), "%\n\n")
+print(loocv_T_W4_df)
+cat("\nSignature size (>= 60% selection frequency):", length(signature_genes_T_W4), "\n")
+print(signature_genes_T_W4)
+
+# --- Retrain final model on all amples ---
+x_T_W4_sig <- x_T_W4_deg[, colnames(x_T_W4_deg) %in% signature_genes_T_W4, drop = FALSE]
+
+# Weights inversely proportional to class frequency to correct for 5 NS vs 9 S imbalance
+n_ns <- sum(y_T_W4 == "NS")
+n_s  <- sum(y_T_W4 == "S")
+w_T_W4 <- ifelse(y_T_W4 == "NS", 1 / n_ns, 1 / n_s)
+
+final_fit_T_W4 <- cv.glmnet(x_T_W4_sig, y_T_W4,
+                             weights      = w_T_W4,
+                             family       = "binomial",
+                             alpha        = 0.5,
+                             nfolds       = nrow(x_T_W4_sig),
+                             type.measure = "class")
+
+```
+
+# Signature Application - T W4 to T D18 and T W2
+
+```{r Apply T W4 Signature to T D18 Samples}
+# Subset T D18 samples to the same signature genes
+T_D18 <- t(T_SandNS_D18) # samples x genes
+
+T_D18_W4shared_genes  <- intersect(signature_genes_T_W4, colnames(T_D18))
+T_D18_W4sig      <- T_D18[, T_D18_W4shared_genes, drop = FALSE]
+
+# Predict S vs NS in T D18 samples
+T_D18_W4pred_class <- predict(final_fit_T_W4, T_D18_W4sig, s = "lambda.1se", type = "class")[, 1]
+T_D18_W4pred_prob  <- predict(final_fit_T_W4, T_D18_W4sig, s = "lambda.1se", type = "response")[, 1]
+
+# Accuracy against known D18 labels
+T_D18_W4pred_correct <- as.integer(T_D18_W4pred_class == as.character(T_coldata$condition))
+
+T_D18_W4pred_df <- data.frame(sample    = rownames(T_D18_W4sig),
+                        true      = as.character(T_coldata$condition),
+                        predicted = T_D18_W4pred_class,
+                        prob_S    = round(T_D18_W4pred_prob, 3),
+                        correct   = T_D18_W4pred_correct)
+
+cat("Predicted classes (T D18 samples):\n")
+print(T_D18_W4pred_df)
+cat("\nAccuracy of T W4 signature on T D18 samples:", round(mean(T_D18_W4pred_correct) * 100, 1), "%\n")
+
+```
+
+```{r Apply T W4 Signature to T W2 Samples}
+# Subset T D18 samples to the same signature genes
+T_W2 <- t(T_W2) # samples x genes
+
+T_W2_W4shared_genes  <- intersect(signature_genes_T_W4, colnames(T_W2))
+T_W2_W4sig      <- T_W2[, T_W2_W4shared_genes, drop = FALSE]
+
+# Predict S vs NS in T D18 samples
+T_W2_W4pred_class <- predict(final_fit_T_W4, T_W2_W4sig, s = "lambda.1se", type = "class")[, 1]
+T_W2_W4pred_prob  <- predict(final_fit_T_W4, T_W2_W4sig, s = "lambda.1se", type = "response")[, 1]
+
+# Accuracy against known D18 labels
+T_W2_W4pred_correct <- as.integer(T_W2_W4pred_class == as.character(T_W2_coldata$condition))
+
+T_W2_W4pred_df <- data.frame(sample    = rownames(T_W2_W4sig),
+                        true      = as.character(T_W2_coldata$condition),
+                        predicted = T_W2_W4pred_class,
+                        prob_S    = round(T_W2_W4pred_prob, 3),
+                        correct   = T_W2_W4pred_correct)
+
+cat("Predicted classes (T W2 samples):\n")
+print(T_W2_W4pred_df)
+cat("\nAccuracy of T W4 signature on T W2 samples:", round(mean(T_W2_W4pred_correct) * 100, 1), "%\n")
+
+```
+
+# Post-Resection Signature Generation
+
+```{r DESeq2 - T Post-Resection Samples (W2 and W4)}
+# Subset T samples from W2 and W4
+T_postres <- data_filt1 %>% dplyr::select(matches("^T_(S|NS).*_W(2|4)"))
+T_postres <- round(T_postres, 0) # Make all counts integers
+
+# Second dataframe with the condition for each T post-resection sample
+T_postres_coldata <- data.frame(row.names = colnames(T_postres), 
+                      condition = ifelse(grepl("T_S", colnames(T_postres)), "S", "NS"),
+                      timepoint = ifelse(grepl("W2", colnames(T_postres)),"W2", "W4"))
+
+# Set the condition as a factor (a datatype) and list NS first so it's the baseline comparison, which is more intuitive
+T_postres_coldata$condition <- factor(T_postres_coldata$condition, levels = c("NS", "S"))
+
+T_postres_dds <- DESeqDataSetFromMatrix(
+  countData = T_postres,
+  colData = T_postres_coldata,
+  design = ~ timepoint + condition)
+
+T_postres_dds <- T_postres_dds[rowSums(counts(T_postres_dds)) > 10, ]
+
+T_postres_dds <- DESeq(T_postres_dds)
+
+resultsNames(T_postres_dds)
+T_postres_res <- results(T_postres_dds, pAdjustMethod = "none")
+
+summary(T_postres_res)
+
+# Order by adjusted p-value, which is the same as the p-value if the pAdjustMethod = none above
+T_postres_res_ordered <- T_postres_res[order(T_postres_res$padj), ]
+view(T_postres_res_ordered %>% data.frame())
+
+# Shrink log2FC
+T_postres_resLFC <- lfcShrink(T_postres_dds, coef="condition_S_vs_NS", type="apeglm")
+
+# Visualize!
+T_postres_res_df <- as.data.frame(T_postres_res)
+
+ggplot(T_postres_res_df, aes(x=log2FoldChange, y=-log10(pvalue))) +
+  geom_point(alpha=0.5) +
+  theme_minimal() + 
+  geom_hline(yintercept = -log10(0.025)) +
+  geom_vline(xintercept = -1) + 
+  geom_vline(xintercept = 1) +
+  xlim(-6,5)
+
+LFc = 1 #logfold change cutoff for DEGs
+pc = 0.025 #pvalue cutoff for DEGs
+
+# Subset results by log2FC > |1| and pval < 0.1 
+upT_postres <- T_postres_res_df[!is.na(T_postres_res_df$pvalue) & T_postres_res_df$padj < 0.025 & T_postres_res_df$log2FoldChange > 1,]
+dnT_S_postres <- T_postres_res_df[!is.na(T_postres_res_df$pvalue) & T_postres_res_df$padj < 0.025 & T_postres_res_df$log2FoldChange < -1,]
+degT_postres <- T_postres_res_df[!is.na(T_postres_res_df$pvalue) & T_postres_res_df$padj < 0.025 & abs(T_postres_res_df$log2FoldChange) > 1,]
+
+```
+
+``` {r Elastic Net Signature Generation - T Post-Resection Samples}
+set.seed(7823)
+
+# --- Build T Post-Resection training matrix ---
+# Filter to just DEGs to improve the model
+x_T_post <- t(as.matrix(T_postres)) # now: samples x genes
+T_post_deg_genes <- rownames(degT_postres)
+x_T_post_deg <- x_T_post[, colnames(x_T_post) %in% T_post_deg_genes, drop = FALSE]
+
+y_T_post <- T_postres_coldata$condition # factor: "NS" (reference) vs "S"
+
+n_T_post <- nrow(x_T_post_deg)
+
+cat("Combined training set:\n")
+print(table(y_T_post))
+cat("Feature count:", ncol(x_T_post_deg), "\n\n")
+
+# --- LOOCV on combined training set ---
+n_T_post         <- nrow(x_T_post_deg)
+gene_freq_T_post <- setNames(rep(0L, ncol(x_T_post_deg)), colnames(x_T_post_deg))
+gene_list_T_post <- vector("list", n_T_post)
+accuracy_T_post  <- rep(NA_real_, n_T_post)
+
+for (i in seq_len(n_T_post)) {
+  x_tr <- x_T_post_deg[-i, , drop = FALSE]
+  y_tr <- y_T_post[-i]
+  x_lo <- x_T_post_deg[i,  , drop = FALSE]
+  y_lo <- y_T_post[i]
+
+  # Recompute weights per fold so they reflect the actual training class counts
+  n_ns_tr <- sum(y_tr == "NS")
+  n_s_tr  <- sum(y_tr == "S")
+  w_tr    <- ifelse(y_tr == "NS", 1 / n_ns_tr, 1 / n_s_tr)
+
+  cvfit_T_post <- cv.glmnet(x_tr, y_tr,
+                       weights      = w_tr,
+                       family       = "binomial",
+                       alpha        = 0.5,
+                       nfolds       = nrow(x_tr), # LOOCV for small n
+                       type.measure = "class")
+
+  coef_T_post     <- coef(cvfit_T_post, s = "lambda.1se")
+  selected_T_post <- rownames(coef_T_post)[coef_T_post[, 1] != 0 & rownames(coef_T_post) != "(Intercept)"]
+  gene_list_T_post[[i]] <- selected_T_post
+  gene_freq_T_post[selected_T_post] <- gene_freq_T_post[selected_T_post] + 1L
+
+  pred_T_post        <- predict(cvfit_T_post, x_lo, s = "lambda.1se", type = "class")[, 1]
+  accuracy_T_post[i] <- as.integer(pred_T_post == as.character(y_lo))
+}
+
+# Gene selection frequency
+gene_freq_T_post_df <- data.frame(
+  gene         = names(gene_freq_T_post),
+  n_selected   = as.integer(gene_freq_T_post),
+  pct_selected = round(as.integer(gene_freq_T_post) / n_T_post * 100, 1)
+) |> dplyr::arrange(desc(n_selected))
+
+# Signature: genes selected in >= 70% of LOOCV runs
+signature_genes_T_post <- gene_freq_T_post_df$gene[gene_freq_T_post_df$pct_selected >= 70]
+
+# Per-sample LOOCV results
+loocv_T_post_df <- data.frame(
+  sample  = rownames(x_T_post_deg),
+  true    = as.character(y_T_post),
+  correct = accuracy_T_post
+)
+
+cat("=== Combined LOOCV Results ===\n")
+cat("Overall accuracy:", round(sum(accuracy_T_post) / n_T_post * 100, 1), "%\n")
+cat("NS accuracy:     ", round(mean(accuracy_T_post[y_T_post == "NS"]) * 100, 1), "%\n")
+cat("S  accuracy:     ", round(mean(accuracy_T_post[y_T_post == "S"])  * 100, 1), "%\n\n")
+print(loocv_T_post_df)
+cat("\nSignature size (>= 70% selection frequency):", length(signature_genes_T_post), "\n")
+print(signature_genes_T_post)
+
+# --- Retrain final model on all samples ---
+x_T_post_sig <- x_T_post_deg[, colnames(x_T_post_deg) %in% signature_genes_T_post, drop = FALSE]
+
+# Weights inversely proportional to class frequency to correct for # NS vs # S imbalance
+n_ns <- sum(y_T_post == "NS")
+n_s  <- sum(y_T_post == "S")
+w_T_post <- ifelse(y_T_post == "NS", 1 / n_ns, 1 / n_s)
+
+final_fit_T_post <- cv.glmnet(x_T_post_sig, y_T_post,
+                             weights      = w_T_post,
+                             family       = "binomial",
+                             alpha        = 0.5,
+                             nfolds       = nrow(x_T_post_sig),
+                             type.measure = "class")
+
+# Show the probabilities for S for these samples
+T_post_prob <- predict(final_fit_T_post, x_T_post_sig, s = "lambda.1se", type = "response")[,1]
+print(as.data.frame(round(T_post_prob, 3)))
+
+```
+
+```{r Heatmap of T Post-Resection Signature}
+# Pull VST-normalized counts from DESeq2 object for clean visualization
+vst_mat_T_post <- assay(vst(T_postres_dds))
+
+# Subset to signature genes and UT samples
+heat_mat_T_post <- vst_mat_T_post[signature_genes_T_post, colnames(T_postres)]
+
+# Annotation bar for condition
+anno_col_T_post <- data.frame(Condition = T_postres_coldata$condition, row.names = rownames(T_postres_coldata))
+
+pheatmap(heat_mat_T_post,
+         annotation_col  = anno_col_T_post,
+         scale           = "row",
+         cluster_cols    = TRUE,
+         cluster_rows    = TRUE,
+         show_colnames   = TRUE,
+         fontsize_row    = 10,
+         main            = "Signature Genes — T Post-Resection Samples")
+
+```
+
+```{r PCA Plot of T Post-Resection Signature}
+ggbiplot(prcomp(t(heat_mat_T_post), scale.=T), 
+         choices = c(1,2),
+         ellipse=T, groups=factor(T_postres_coldata$condition, levels = c("S", "NS")),
+         var.axes=T, var.scale=1) + 
+  theme_classic() + 
+  xlim(-2.5,4) +
+  ylim(-3.5,3) +
+  # theme(legend.position = "top") +
+  ggtitle("PCA Plot - T Post-Resection Signature") 
+
+```
+
+
+
+
+
+
+# Signature Application - T Post-Resection to T D18
+
+```{r Apply T Post-Resection Signature to T D18 Samples}
+# Subset T D18 samples to the same signature genes
+T_D18 <- t(T_SandNS_D18) # samples x genes
+
+T_D18_post_shared_genes  <- intersect(signature_genes_T_post, colnames(T_D18))
+T_D18_post_sig      <- T_D18[, T_D18_post_shared_genes, drop = FALSE]
+
+# Predict S vs NS in T D18 samples
+T_D18_post_pred_class <- predict(final_fit_T_post, T_D18_post_sig, s = "lambda.1se", type = "class")[, 1]
+T_D18_post_pred_prob  <- predict(final_fit_T_post, T_D18_post_sig, s = "lambda.1se", type = "response")[, 1]
+
+# Accuracy against known D18 labels
+T_D18_post_pred_correct <- as.integer(T_D18_post_pred_class == as.character(T_coldata$condition))
+
+T_D18_post_pred_df <- data.frame(sample    = rownames(T_D18_post_sig),
+                        true      = as.character(T_coldata$condition),
+                        predicted = T_D18_post_pred_class,
+                        prob_S    = round(T_D18_post_pred_prob, 3),
+                        correct   = T_D18_post_pred_correct)
+
+cat("Predicted classes (T D18 samples):\n")
+print(T_D18_post_pred_df)
+cat("\nAccuracy of T W4 signature on T D18 samples:", round(mean(T_D18_post_pred_correct) * 100, 1), "%\n")
+
+```
+
+
+
+```{r DEGs D18 to W2 in UT mice}
+# TODO: T and UT D18 to W2. Overlapping DEGs, then remove genes changing in the same way? (filtering based on directionality)
+```
+
+
+
