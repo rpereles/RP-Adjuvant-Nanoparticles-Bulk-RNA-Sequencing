@@ -54,6 +54,9 @@ library(rstatix)
 library(glmnet)
 #BiocManager::install("ggtreeExtra")
 
+install.packages("pROC")
+library(pROC)
+
 ```
 
 
@@ -355,6 +358,27 @@ ggbiplot(prcomp(t(heat_mat), scale.=T),
 
 ```
 
+# UT D18 ROC Curve
+
+```{r UT D18 ROC Curve}
+UT_D18_SigProb <- predict(cvfit,
+  newx = x_deg,
+  s = "lambda.1se",
+  type = "response"
+)
+
+roc_obj <- roc(
+  response = coldata$condition,
+  predictor = as.numeric(UT_D18_SigProb),
+  levels = c("NS", "S")
+)
+
+plot(roc_obj)
+auc(roc_obj)
+
+```
+
+
 # T D18 Signature Generation
 
 ```{r DESeq2 - T D18}
@@ -507,6 +531,26 @@ ggbiplot(prcomp(t(heat_mat_T), scale.=T),
   # xlim(-2,2.5) +
   theme(legend.position = "top") +
   ggtitle("PCA Plot - T D18 Signature") 
+
+```
+
+# T D18 ROC Curve
+
+```{r T D18 ROC Curve}
+T_D18_SigProb <- predict(cvfit,
+  newx = x_deg_t,
+  s = "lambda.1se",
+  type = "response"
+)
+
+roc_obj <- roc(
+  response = T_coldata$condition,
+  predictor = as.numeric(T_D18_SigProb),
+  levels = c("NS", "S")
+)
+
+plot(roc_obj)
+auc(roc_obj)
 
 ```
 
@@ -1599,7 +1643,7 @@ cat("\nAccuracy of T W4 signature on T W2 samples:", round(mean(T_W2_W4pred_corr
 
 ```
 
-# Post-Resection Signature Generation
+# T Post-Resection Signature Generation
 
 ```{r DESeq2 - T Post-Resection Samples (W2 and W4)}
 # Subset T samples from W2 and W4
@@ -1786,7 +1830,19 @@ ggbiplot(prcomp(t(heat_mat_T_post), scale.=T),
 
 ```
 
+# T Post-Resection ROC Curve
 
+```{r T D18 ROC Curve}
+roc_obj <- roc(
+  response = T_postres_coldata$condition,
+  predictor = as.numeric(T_post_prob),
+  levels = c("NS", "S")
+)
+
+plot(roc_obj)
+auc(roc_obj)
+
+```
 
 
 
