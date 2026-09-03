@@ -1,7 +1,7 @@
 ---
-title: "260529 NCAP BulkSeq Pathways"
+title: "260713 NCAP BulkSeq Pathways"
 output: html_document
-date: "2026-05-29"
+date: "2026-07-13"
 ---
 
 ```{r setup, include=FALSE}
@@ -433,7 +433,7 @@ T_D18_GO_df <- subset(T_D18_GO_df, p.adjust < 0.05 & abs(NES) > 1.5)
 T_D18_GO_NES <- T_D18_GO_df %>%
   arrange(desc(abs(NES)))
 
-ggplot(T_D18_GO_NES[1:30, ],
+ggplot(T_D18_GO_NES,
        aes(x = NES,
            y = reorder(Description,NES))) +
   geom_point(aes(size = setSize,
@@ -442,130 +442,146 @@ ggplot(T_D18_GO_NES[1:30, ],
 
 ```
 
+## Unique T D18 Pathways
+
+```{r Compare T D18 and UT D18 Pathways}
+T_D18_uniqueGO <- anti_join(T_D18_GO_df, UT_D18_GO_df, by = "Description")
+
+common_D18_GO <- inner_join(T_D18_GO_df, UT_D18_GO_df, by = "Description")
+
+```
+
 ## GO Pathway/Gene Identification
 
 ```{r T D18 GO Pathways}
+temp_df <- T_D18_uniqueGO
 # Antigen presentation pathways
 T_D18_agpres_pathways <- getMatches(c("antigen", "MHC", "major", "HLA", 
                                        "histocompat", "cross presentation", 
                                        "immunoproteasome", "TAP", "peptide 
                                        loading","class I", "class II", "APM"), 
-                                     T_D18_GO_df, 
+                                     temp_df, 
                                      "pathways")
 
 # (moDC) effector cytokine release
 T_D18_eff_cyto <- getMatches(c("interleukin", "TNF", "tumor necrosis factor", 
                                 "effector", "cytokine"),
-                              T_D18_GO_df,
+                              temp_df,
                               "pathways")
 
 # Adaptive immunity
 T_D18_lymphocyte_pathways <- getMatches(c("T cell", "lymphocyte", "B cell", 
-                                           "NK cell", "natural", "adapti"), 
-                                         T_D18_GO_df,
+                                           "NK cell", "natural", "adapti", "T-"), 
+                                         temp_df,
                                          "pathways")
 
 # Interferon responses
 T_D18_ifn_pathways <- getMatches(c("interferon", "IFN"), 
-                                  T_D18_GO_df,
+                                  temp_df,
                                   "pathways")
 
 # Innate immunity
 T_D18_leuk_pathways <- getMatches(c("leukocyte", "neutrophil", "monocyte", 
-                                     "macrophage", "innate", "immun", "myeloid", 
-                                     "mononuc"), 
-                                   T_D18_GO_df, 
+                                    "macrophage", "innate", "immun", "myeloid", 
+                                    "mononuc", "granulocyt", "vir", "toxic",
+                                    "inflamm"), 
+                                   temp_df, 
                                    "pathways")
 
 # Immunosuppression
 T_D18_immunosupp_pathways <- getMatches(c("immunosupp", "downreg"), 
-                                         T_D18_GO_df, 
+                                         temp_df, 
                                          "pathways") # 0 pathways!
 
 # MDSC NETosis
 T_D18_netosis_genes <- getMatches(c("Pad", "Elane", "Mpo"),
-                                    T_D18_GO_df,
+                                    temp_df,
                                     "genes")
 
 # MDSC immunosuppression
 T_D18_MDSCimmunosupp_genes <- getMatches(c("Il10", "Mmp", "iNOS", "nos", "nox", 
                                             "TGF", "Arg1", "Cd206", "Ym1"), 
-                                 T_D18_GO_df,
+                                 temp_df,
                                  "genes") 
 
 # Neutrophil degranulation
 T_D18_degran_genes <- getMatches(c("Elane", "Ela", "Ltf", "Mmp9", "TNF", "Lyz", 
                                         "Mmp25", "uPAR", "Mmp13", "Lcn", "Ctsg", 
                                         "Prtn3"),
-                                      T_D18_GO_df,
+                                      temp_df,
                                       "genes")
 
 # moMacs
 T_D18_moMac_genes <- getMatches(c("Trem2", "Spp1", "Folr2", "Opn"),
-                                 T_D18_GO_df,
+                                 temp_df,
                                  "genes")
 
 # Anti-tumor cytokine production
 T_D18_cyto_genes <- getMatches(c("TNF", "Il1", "Ccl3", "Cxcl10"),
-                                T_D18_GO_df,
+                                temp_df,
                                 "genes")
 
 # Hypoxia
 T_D18_hypoxia_genes <- getMatches(c("Hif", "Glut", "GYS1", "Adam12", "Lox"), 
-                                   T_D18_GO_df,
+                                   temp_df,
                                    "genes")
 
 T_D18_hypoxia_pathways <- getMatches(c("hypoxia", "oxygen"),
-                                      T_D18_GO_df,
+                                      temp_df,
                                       "pathways")
 
 # Angiogenesis
 T_D18_angiogen_genes <- getMatches(c("Vegf", "Angpt", "Notch1", "Fscn2", "FGF", 
                                       "EGF", "PDGF"), 
-                                    T_D18_GO_df,
+                                    temp_df,
                                     "genes") # heart/muscle related pathways
 
 T_D18_angiogen_pathways <- getMatches(c("vasc", "endothel", "angio", "card"),
-                                      T_D18_GO_df,
+                                      temp_df,
                                       "pathways")
 
 # Myelopoiesis
 T_D18_myelopoiesis_genes <- getMatches(c("Csf", "Cebp", "Atf3", "Stat3", "Ccr2"),
-                                        T_D18_GO_df,
+                                        temp_df,
                                         "genes")
 
 # Eosinophil activity
 T_D18_eosin_pathways <- getMatches(c("eosin", "eotax"),
-                                    T_D18_GO_df,
+                                    temp_df,
                                     "pathways")
 
 T_D18_eosin_genes <- getMatches(c("Ccl11", "Ccl24", "Ccl26", "Epx", "Prg2", 
                                      "Ear", "Ccr3", "Il5ra", "Siglecf", "Gata1", 
                                      "Cebpa", "Spi1", "Ido", "TGFb"), 
-                                   T_D18_GO_df,
+                                   temp_df,
                                    "genes")
 
 # General metabolism
 T_D18_metab_pathways <- getMatches(c("metabo", "anabo", "catabo", "biosyn"), 
-                                    T_D18_GO_df, 
+                                    temp_df, 
                                     "pathways")
 
 # Lipid metabolism and fatty acid accumulation
 T_D18_lipid_pathways <- getMatches(c("lipid", "fat", "adipo", "unsatur", 
                                       "satur", "cholesterol", "lipo"),
-                                    T_D18_GO_df,
+                                    temp_df,
                                     "pathways")
 
 T_D18_lipid_genes <- getMatches(c("Ppar", "Srebp", "Lxr", "Fasn", "Acc", "Cpt1a", 
                                    "Acox", "Apo", "Aldoc", "Pcsk9"), 
-                                 T_D18_GO_df,
+                                 temp_df,
                                  "genes")
+
+# Differentiation
+T_D18_diff_pathways <- getMatches(c("different"),
+                                  temp_df,
+                                  "pathways")
 
 # Signature genes
 T_D18_sigGenes <- getMatches(c("Insrr", "Cxcl11", "Chi3l1", "Stfa2l1", "Cstdc5", 
                                "Stfa2", "Syt12", "Me1", "Mtarc1", "Baiap3", 
                                "Cabp4", "Ifit1bl1", "Adamtsl2", "Jchain"), 
-                             T_D18_GO_df, 
+                             temp_df, 
                              "genes")
 
 # for (i in seq_len(nrow(T_D18_neut_genes))) {
@@ -580,7 +596,7 @@ T_D18_sigGenes <- getMatches(c("Insrr", "Cxcl11", "Chi3l1", "Stfa2l1", "Cstdc5",
 
 ```
 
-11 pathways associated with angiogenesis genes. 10/11 downregulated in survivors
+10 pathways associated with angiogenesis genes. 9/10 downregulated in survivors
 
 Most upregulated pathways are related to mitosis/fibril organization or molecule
 transport, suggesting that the scaffold is experiencing tissue remodeling and 
@@ -589,12 +605,12 @@ normal FBR, rather than dysregulated immune signaling.
 
 IFN responses and leukocyte regulation are downregulated in survivors.
 
-7/8 metabolism pathways are downregulated in survivors, suggesting that an 
+4/5 metabolism pathways are downregulated in survivors, suggesting that an 
 over-active system is detrimental for NP efficacy?? 
-Genes related to lipid metabolism are all in downregulated pathways (n=17). 
+Genes related to lipid metabolism are all in downregulated pathways (n=16). 
 
-Pathways associated with neutrophil-mediated immunosuppression are largely
-downregulated in survivors (12/14 downregulated)
+Pathways associated with neutrophil-mediated immunosuppression/myelopoiesis are 
+largely downregulated in survivors (11/12 downregulated)
 
 Signature genes:
 Found in 6 pathways, all downregulated:
@@ -606,9 +622,35 @@ Found in 6 pathways, all downregulated:
   but rather waiting on external stimuli to induce immune responses
 - 1 angiogenesis
 
+```{r T D18 Selected Pathways}
+# Upregulated pathways 
+T_D18_GOup <- T_D18_GO_df[T_D18_GO_df$NES > 0, ]
 
-# TODO: Find unique T D18 pathways vs UT D18 pathways, as well as similarities
-(started doing this in committee meeting slides)
+# Associated with cell division, fibril organization, and transport
+T_D18_GOup <- T_D18_GOup %>%
+  arrange(desc(abs(NES)))
+
+T_D18_GOsel <- T_D18_GOup[-c(3,7,10),]
+
+ggplot(T_D18_GOsel,
+       aes(x = NES,
+           y = reorder(Description,NES))) +
+  geom_point(aes(size = setSize,
+                 color = -log10(p.adjust))) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  theme(aspect.ratio = 0.9) +
+  consistent_scale
+
+ggplot(T_D18_sigGenes,
+       aes(x = NES,
+           y = reorder(Description,NES))) +
+  geom_point(aes(size = setSize,
+                 color = -log10(p.adjust))) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  theme(aspect.ratio = 0.9) +
+  consistent_scale
+
+```
 
 ## GSEA - Hallmarks MSigDB
 
@@ -636,6 +678,17 @@ ggplot(T_D18_HM_NES[1:20, ],
   geom_point(aes(size = setSize,
                  color = -log10(p.adjust))) +
   geom_vline(xintercept = 0, linetype = 2)
+
+```
+
+## Unique T D18 Pathways
+# TODO: Didn't do UT D18 HM yet
+
+```{r Compare T D18 with UT D18 HM}
+# TODO: 
+T_D18_uniqueHM <- anti_join(T_D18_HM_df, UT_D18_HM_df, by = "Description")
+
+common_D18_GO <- inner_join(T_D18_GO_df, UT_D18_GO_df, by = "Description")
 
 ```
 
@@ -886,7 +939,7 @@ dotplot(T_NS_post_GO,
 T_NS_post_GO_NES <- T_NS_post_GO_df %>%
   arrange(desc(abs(NES)))
 
-ggplot(T_NS_post_GO_NES[1:30, ],
+ggplot(T_NS_post_GO_NES,
        aes(x = NES,
            y = reorder(Description,NES))) +
   geom_point(aes(size = setSize,
@@ -1074,7 +1127,7 @@ consistent_scale <- scale_color_continuous(
   limits = c(0, 10),       # Fix the absolute min and max of your color bar
   breaks = seq(0, 10, 2),  # Force the legend to show specific tick marks
   type = "viridis",        # Keeps the palette uniform
-  guide = guide_colourbar(direction = "horizontal")
+  # guide = guide_colourbar(direction = "horizontal")
 )
 
 # Visualize MDSC dataframe
@@ -1847,8 +1900,7 @@ p4 <- ggplot(T_S_post_HM_NES,
            y = reorder(Description,NES))) +
   geom_point(aes(size = setSize,
                  color = -log10(p.adjust))) +
-  geom_vline(xintercept = 0, linetype = 2) +
-  consistent_scale
+  geom_vline(xintercept = 0, linetype = 2) 
 
 ```
 
@@ -2507,6 +2559,240 @@ ggplot(T_S_D18base_commonHM_df,
 
 ```
 
+# Rescued (T S) D18 vs T NS D18
+
+## DESeq2
+
+```{r Rsc D18 vs T NS D18 DESeq2}
+# Subset Rsc and T NS from the T D18 dataframe
+Rsc_T_NS_D18 <- T_SandNS_D18 %>% dplyr::select(matches("^T_(NS|S3|S6|S8|S9)"))
+
+# Second dataframe with the group of each sample
+Rsc_T_NS_D18_coldata <- data.frame(row.names = colnames(Rsc_T_NS_D18), 
+                                   group = ifelse(grepl("T_S", colnames(Rsc_T_NS_D18)),
+                                                      "Rsc", "NS"))
+Rsc_T_NS_D18_coldata$group <- factor(Rsc_T_NS_D18_coldata$group, 
+                                     levels = c("NS", "Rsc")) # NS is baseline!
+
+# Perform DESeq2
+Rsc_T_NS_D18_dds <- DESeqDataSetFromMatrix(
+  countData = Rsc_T_NS_D18,
+  colData = Rsc_T_NS_D18_coldata,
+  design = ~ group
+)
+
+Rsc_T_NS_D18_dds <- Rsc_T_NS_D18_dds[rowSums(counts(Rsc_T_NS_D18_dds)) > 10, ]
+
+Rsc_T_NS_D18_dds <- DESeq(Rsc_T_NS_D18_dds)
+
+Rsc_T_NS_D18_res <- results(Rsc_T_NS_D18_dds, pAdjustMethod = "none")
+
+# Visualize!
+Rsc_T_NS_D18_df <- as.data.frame(Rsc_T_NS_D18_res)
+
+ggplot(Rsc_T_NS_D18_df, aes(x=log2FoldChange, y=-log10(padj))) +
+  geom_point(alpha=0.5) +
+  theme_minimal() + 
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_vline(xintercept = -1) + 
+  geom_vline(xintercept = 1) 
+
+LFc = 1 #logfold change cutoff for DEGs
+pc = 0.05 #pvalue cutoff for DEGs
+
+```
+
+## GSEA - GO Database
+
+```{r }
+# Create a new column in the DESeq2 output that contains the EntrezIDs
+Rsc_T_NS_D18_res$entrezID <- gene_info$entrezgene_id[
+    match(rownames(Rsc_T_NS_D18_res), gene_info$external_gene_name)]
+
+# Remove EntrezIDs that are just . or have multiple listed
+Rsc_T_NS_D18_res <- Rsc_T_NS_D18_res[!Rsc_T_NS_D18_res$entrezID == ".", ]
+Rsc_T_NS_D18_res <- Rsc_T_NS_D18_res[!grepl(",", Rsc_T_NS_D18_res$entrezID), ]
+
+# Create the gene list for gseGO()
+Rsc_T_NS_D18_geneList <- Rsc_T_NS_D18_res$stat
+names(Rsc_T_NS_D18_geneList) <- Rsc_T_NS_D18_res$entrezID
+
+Rsc_T_NS_D18_geneList <- sort(Rsc_T_NS_D18_geneList, decreasing = TRUE)
+
+# Perform gseGO
+Rsc_T_NS_D18_GO <- gseGO(
+    geneList = Rsc_T_NS_D18_geneList,
+    OrgDb = org.Mm.eg.db,
+    keyType = "ENTREZID",
+    ont = "BP",
+    pvalueCutoff = 0.05
+)
+
+Rsc_T_NS_D18_GO <- simplify(Rsc_T_NS_D18_GO, cutoff = 0.7)
+
+Rsc_T_NS_D18_GO_df <- as.data.frame(setReadable(Rsc_T_NS_D18_GO, OrgDb = org.Mm.eg.db, keyType = "ENTREZID"))
+
+Rsc_T_NS_D18_GO_df <- subset(Rsc_T_NS_D18_GO_df, p.adjust < 0.05 & abs(NES) > 2)
+
+# Visualize gseGO results (defaults to GeneRatio)
+dotplot(Rsc_T_NS_D18_GO, 
+        showCategory = 15) +
+    theme(axis.text.y = element_text(size = 6))
+
+# Visualize gseGO results with NES on x-axis (more intuitive)
+Rsc_T_NS_D18_GO_NES <- Rsc_T_NS_D18_GO_df %>%
+  arrange(desc(abs(NES)))
+
+ggplot(Rsc_T_NS_D18_GO_NES,
+       aes(x = NES,
+           y = reorder(Description,NES))) +
+  geom_point(aes(size = setSize,
+                 color = -log10(p.adjust))) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  consistent_scale
+
+```
+Negative NES = upregulated in NS
+  Type 1 interferons
+  Lipid catabolic processes
+Positive NES = upregulated in Rsc
+  Non-lipid catabolic processes (glucose, ADP, purines/pyridines)
+
+## Unique Rsc vs. T NS D18 GO Pathway/Gene Identification
+
+```{r}
+Rsc_T_NS_D18_uniqueGO <- anti_join(Rsc_T_NS_D18_GO_df, T_D18_GO_df, by = "Description")
+
+temp_df <- Rsc_T_NS_D18_uniqueGO
+
+# MDSC NETosis
+RscD18_netosis_genes <- getMatches(c("Pad", "Elane", "Mpo"),
+                                    temp_df,
+                                    "genes")
+
+# MDSC immunosuppression
+RscD18_MDSCimmunosupp_genes <- getMatches(c("Il10", "Mmp", "iNOS", "nos", "nox", 
+                                            "TGF", "Arg1", "Cd206", "Ym1"), 
+                                 temp_df,
+                                 "genes") 
+
+# Neutrophil degranulation
+RscD18_degran_genes <- getMatches(c("Elane", "Ela", "Ltf", "Mmp9", "TNF", "Lyz", 
+                                        "Mmp25", "uPAR", "Mmp13", "Lcn", "Ctsg", 
+                                        "Prtn3"),
+                                      temp_df,
+                                      "genes")
+
+# Angiogenesis
+RscD18_angiogen_genes <- getMatches(c("Vegf", "Angpt", "Notch1", "Fscn2", "FGF", 
+                                      "EGF", "PDGF"), 
+                                    temp_df,
+                                    "genes") 
+
+# Myelopoiesis
+RscD18_myelopoiesis_genes <- getMatches(c("Csf", "Cebp", "Atf3", "Stat3", "Ccr2"),
+                                        temp_df,
+                                        "genes")
+
+# moMacs
+RscD18_moMac_genes <- getMatches(c("Trem2", "Spp1", "Folr2", "Opn"),
+                                 temp_df,
+                                 "genes")
+
+```
+
+## GO Selected Pathways Dotplots
+
+```{r Rsc vs. T NS D18 Selected Pathways}
+# Select pathways related to immune responses
+RscD18sel_df <- Rsc_T_NS_D18_uniqueGO[grepl("response", 
+                                            Rsc_T_NS_D18_uniqueGO$Description),]
+
+# Visualize
+RscD18sel_df <- RscD18sel_df %>%
+  arrange(desc(abs(NES)))
+
+ggplot(RscD18sel_df,
+       aes(x = NES,
+           y = reorder(Description,NES))) +
+  geom_point(aes(size = setSize,
+                 color = -log10(p.adjust))) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  theme(aspect.ratio = 0.25) +
+  consistent_scale
+
+# Select pathways related to MDSCs
+RscD18mdsc_df <- Rsc_T_NS_D18_uniqueGO[grepl("GO:0061180|GO:0006631|GO:0003229|GO:0009615",
+                                             Rsc_T_NS_D18_uniqueGO$ID),]
+
+# Visualize
+RscD18mdsc_df <- RscD18mdsc_df %>%
+  arrange(desc(abs(NES)))
+
+ggplot(RscD18mdsc_df,
+       aes(x = NES,
+           y = reorder(Description,NES))) +
+  geom_point(aes(size = setSize,
+                 color = -log10(p.adjust))) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  theme(aspect.ratio = 0.25) +
+  consistent_scale
+
+```
+
+## Macrophage/Monocyte Scores
+
+```{r Broad Macrophage Score}
+macrophage_markers <- c("Adgre1", "Csf1r", "Cd68", "Lyz2", "Aif1", "Fcgr1", 
+                        "Tyrobp", "Ctss", "Lgals3","C1qa", "C1qb", "C1qc", 
+                        "Mertk")
+
+# Pull VST-normalized counts from DESeq2 object for clean visualization
+RscD18_vst_mat <- assay(vst(Rsc_T_NS_D18_dds))
+
+# Subset matrix to macrophage markers
+# Find all macrophage markers
+macrophage_idx <- intersect(macrophage_markers, rownames(RscD18_vst_mat))
+# Pull those rows into a new matrix and perform z-score for each marker
+macrophage_mat <- t(scale(t(RscD18_vst_mat[macrophage_idx, ])))
+# Compute the overall macrophage score for each sample (column)
+macrophage_score <- colMeans(macrophage_mat)
+
+```
+
+```{r IFN-Stimulated Macrophage Score}
+ifn_myeloid_genes <- c("Acod1", "Irgm1", "Irgm2", "Gbp3", "Gbp6", "Gbp7", "Igtp",
+                       "Iigp1", "Iigp1c", "Ifi47", "Tgtp1", "Tgtp2")
+
+# Subset VST matrix to IFN-stimulated myeloid markers
+# Find all relevant markers
+ifn_idx <- intersect(ifn_myeloid_genes, rownames(RscD18_vst_mat))
+# Pull those rows into a new matrix and perform z-score for each marker
+ifn_mat <- t(scale(t(RscD18_vst_mat[ifn_idx, ])))
+# Compute the overall macrophage score for each sample (column)
+ifn_score <- colMeans(ifn_mat)
+
+plot(macrophage_score, ifn_score)
+text(macrophage_score, ifn_score, labels = colnames(ifn_mat), pos = 3)
+
+```
+```{r Monocyte Score}
+monocyte_genes <- c("Ly6c2", "Ccr2", "Lyz2", "Lilrb4", "Ctss", "Fcgr3", "Csf1r", 
+                    "Lst1", "Tyrobp", "Fcer1g", "Aif1", "Ms4a7", "Lgals3", "Fcgr1",
+                    "Cd14", "Itgam", "Adgre1", "Sell", "Clec12a", "Plac8", "F13a1")
+
+# Subset VST matrix to monocyte genes
+# Find all relevant genes
+mono_idx <- intersect(monocyte_genes, rownames(RscD18_vst_mat))
+# Pull those rows into a new matrix and perform z-score for each marker
+mono_mat <- t(scale(t(RscD18_vst_mat[mono_idx, ])))
+# Compute the overall macrophage score for each sample (column)
+mono_score <- colMeans(mono_mat)
+
+```
+
+Unfortunately, none of these outputs have a clear pattern. 
+
 
 # Final Plots
 
@@ -2516,6 +2802,14 @@ library(patchwork)
 (p1 + p2 + p3 + p4) + plot_layout(guides = "collect")
  
 ```
+
+
+
+
+
+
+
+
 
 
 

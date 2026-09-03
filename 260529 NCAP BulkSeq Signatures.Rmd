@@ -266,6 +266,7 @@ n <- nrow(x_deg)
 gene_freq <- setNames(rep(0L, ncol(x_deg)), colnames(x_deg))
 gene_list <- vector("list", n)
 accuracy_vec <- rep(NA_real_, n)
+prob_vec <- rep(NA_real_, n)
 
 # LOOCV: leave one sample out per iteration
 for (i in seq_len(n)) {
@@ -304,6 +305,10 @@ for (i in seq_len(n)) {
   # Correct (1) or incorrect (0) for the left-out sample
   pred_class <- predict(cvfit, x_lo, s = "lambda.1se", type = "class")[, 1]
   accuracy_vec[i] <- as.integer(pred_class == as.character(y_lo))
+  
+  # Save LOO probabilities
+  pred_prob <- predict(cvfit, x_lo, s = "lambda.1se", type = "response")[, 1]
+  prob_vec[i] <- pred_prob
 }
 
 # Gene selection frequency
@@ -361,20 +366,30 @@ ggbiplot(prcomp(t(heat_mat), scale.=T),
 # UT D18 ROC Curve
 
 ```{r UT D18 ROC Curve}
-UT_D18_SigProb <- predict(cvfit,
-  newx = x_deg,
-  s = "lambda.1se",
-  type = "response"
+library(pROC)
+library(ggplot2)
+
+# Ensure that S = 1 and NS = 0
+response_binary <- ifelse(as.character(y) == "S", 1, 0)
+
+roc_obj <- pROC::roc(
+  response  = response_binary,
+  predictor = prob_vec,
+  levels    = c(0, 1),
+  direction = "<"
 )
 
-roc_obj <- roc(
-  response = coldata$condition,
-  predictor = as.numeric(UT_D18_SigProb),
-  levels = c("NS", "S")
-)
+ci.auc(roc_obj)
 
-plot(roc_obj)
-auc(roc_obj)
+# Plot
+plot(
+  roc_obj,
+  col              = "steelblue",
+  print.auc        = TRUE,
+  auc.polygon      = TRUE,
+  auc.polygon.col  = "lightblue",
+  main             = "LOO ROC Curve - UT D18 Gene Signature"
+)
 
 ```
 
@@ -599,6 +614,164 @@ np_ns_df <- T_pred_df[T_pred_df$true == "NS",]
 np_ns <- sum(T_pred_correct == TRUE & y_t == "NS")/nrow(np_ns_df)
 print(np_ns_df)
 cat("Accuracy of the model for T NS samples:", round(np_ns * 100, 1), "%\n")
+
+```
+
+
+
+# Signature Application - UT D18 to T D18 S
+
+``` {r Apply UT D18 Signature to T D18 S}
+# Retrain a final model on D18 UT samples using only the UT signature genes
+x_ut_sig <- x[, colnames(x) %in% signature_genes, drop = FALSE]
+
+ut_final_fit <- cv.glmnet(x_ut_sig, y,
+                           family       = "binomial",
+                           alpha        = 0.5,
+                           nfolds       = nrow(x_ut_sig),  # LOOCV
+                           type.measure = "class")
+
+# Subset T S samples from D18
+T_S_D18 <- data_filt1 %>% dplyr::select(matches("^T_S.*_D18$"))
+T_S_D18 <- round(T_S_D18, 0) # Make all counts integers
+T_S_D18 <- t(as.matrix(T_S_D18))
+
+# Subset T S samples to the same signature genes
+shared_genes  <- intersect(signature_genes, colnames(T_S_D18))
+T_S_D18_sig       <- T_S_D18[, shared_genes, drop = FALSE]
+
+# Predict S vs NS in T samples
+T_S_D18pred_class <- predict(ut_final_fit, T_S_D18_sig, s = "lambda.1se", type = "class")[, 1]
+T_S_D18pred_prob  <- predict(ut_final_fit, T_S_D18_sig, s = "lambda.1se", type = "response")[, 1]
+
+# Change the threshold of the class (instead of 0.5 default)
+custom_thresh <- 0.7
+T_S_D18pred_class <- ifelse(T_S_D18pred_prob > custom_thresh, "S", "NS")
+
+# Accuracy against known T labels
+T_S_D18pred_correct <- as.integer(T_S_D18pred_class == "S")
+
+T_S_D18pred_df <- data.frame(sample    = rownames(T_S_D18_sig),
+                        true      = "S",
+                        predicted = T_S_D18pred_class,
+                        prob_S    = round(T_S_D18pred_prob, 3),
+                        correct   = T_S_D18pred_correct)
+
+cat("UT signature genes used:    ", length(signature_genes), "\n")
+cat("Genes found in T matrix:    ", length(shared_genes), "\n\n")
+cat("Predicted classes (T samples):\n")
+print(T_S_D18pred_df)
+
+```
+### Rescued Phenotype - Clustering Visualization 
+```{r D18 UT Samples and T S Heatmap}
+# Create DESeq2 object with all samples of interest
+mostD18 <- dplyr::bind_rows(as.data.frame(T_S_D18_sig), as.data.frame(x_ut_sig))
+
+mostD18_coldata <- data.frame(row.names = rownames(mostD18), 
+                      condition = ifelse(grepl("(UT|T)_S", rownames(mostD18)), 
+                                         "S", "NS"))
+mostD18_coldata$condition <- factor(mostD18_coldata$condition, levels = c("NS", "S"))
+
+
+mostD18_dds <- DESeqDataSetFromMatrix(
+  countData = t(mostD18),
+  colData = mostD18_coldata,
+  design = ~ 1)
+
+# Pull VST-normalized counts from DESeq2 object for clean visualization
+vst_mostD18 <- assay(varianceStabilizingTransformation(mostD18_dds))
+
+# Annotation bar for condition
+anno_col_mostD18 <- data.frame(Condition = mostD18_coldata$condition, row.names = rownames(mostD18_coldata))
+
+pheatmap(vst_mostD18,
+         annotation_col  = anno_col_mostD18,
+         scale           = "row",
+         cluster_cols    = TRUE,
+         cluster_rows    = TRUE,
+         show_colnames   = TRUE,
+         fontsize_row    = 10,
+         main            = "Unsupervised Clustering - UT D18 Signature")
+
+
+
+# Separate out UT NS and T S to see how they cluster (without UT S)
+clustD18test <- vst_mostD18[,!grepl("UT_S", colnames(vst_mostD18))]
+
+clustD18test_coldata <- data.frame(row.names = colnames(clustD18test), 
+                      condition = ifelse(grepl("T_S", colnames(clustD18test)), 
+                                         "S", "NS"))
+clustD18test_coldata$condition <- factor(clustD18test_coldata$condition, levels = c("NS", "S"))
+
+# Annotation bar for condition
+anno_col_clustD18test <- data.frame(Condition = clustD18test_coldata$condition, row.names = rownames(clustD18test_coldata))
+
+pheatmap(clustD18test,
+         annotation_col  = anno_col_clustD18test,
+         scale           = "row",
+         cluster_cols    = TRUE,
+         cluster_rows    = TRUE,
+         show_colnames   = TRUE,
+         fontsize_row    = 10,
+         main            = "Unsupervised Clustering - UT D18 Signature w/o UT S")
+
+
+
+# Separate out all T S samples to see if the rescued mice cluster separately
+Rsc_T_D18 <- vst_mostD18[,grepl("^T_S", colnames(vst_mostD18))]
+
+Rsc_T_D18_coldata <- data.frame(row.names = colnames(Rsc_T_D18), 
+                      condition = ifelse(grepl("T_S(3|6|8|9)", colnames(Rsc_T_D18)), 
+                                         "Rsc", "NotRsc"))
+Rsc_T_D18_coldata$condition <- factor(Rsc_T_D18_coldata$condition, 
+                                      levels = c("Rsc", "NotRsc"))
+
+# Annotation bar for condition
+anno_Rsc_T_D18 <- data.frame(Condition = Rsc_T_D18_coldata$condition, row.names = rownames(Rsc_T_D18_coldata))
+
+anno_colors = list(Condition = c(Rsc="blue", NotRsc="gold"))
+
+pheatmap(Rsc_T_D18,
+         annotation_col    = anno_Rsc_T_D18,
+         annotation_colors = anno_colors,
+         scale             = "row",
+         cluster_cols      = TRUE,
+         cluster_rows      = TRUE,
+         show_colnames     = TRUE,
+         fontsize_row      = 10,
+         main              = "Unsupervised Clustering - Rsc vs. Other T S D18")
+
+```
+
+
+```{r PCA Plot of UT D18 signature applied to T S D18}
+# New coldata matrix to account for a third level (rescued phenotype - Rsc)
+clust3_D18_coldata <- clustD18test_coldata
+levels(clust3_D18_coldata$condition) <- c("NS", "S", "Rsc")
+rescued_idx <- grepl("T_S(3|6|8|9)", rownames(clustD18test_coldata))
+clust3_D18_coldata$condition[rescued_idx] <- "Rsc"
+
+ggbiplot(prcomp(t(clustD18test), scale. = T), 
+         choices = c(1,2), # which PCs to plot
+         ellipse = T, 
+         # labels = colnames(clustD18test),
+         # labels.size = 3.5,
+         # circle = T,
+         groups=factor(clust3_D18_coldata$condition, levels = c("NS", "S", "Rsc")),
+         var.axes = F, # T = show gene contributions (arrows)
+         var.scale = 1) + 
+  # geom_point(aes(color = clustD18test_coldata$condition), size = 2) + # force dots
+  theme_classic() + 
+  xlim(-3,3) +
+  theme(legend.position = "top") +
+  ggtitle("UT D18 Signature - 3 Clusters") +
+  scale_color_manual(values = c("NS"  = "#00BFC4", 
+                                "S"   = "salmon", 
+                                "Rsc" = "darkgrey")) +
+  scale_fill_manual(values = c("NS"  = "#A6E5E6",
+                               "S"   = "#FFA69E",
+                               "Rsc" = "lightgray"))
 
 ```
 
@@ -1821,9 +1994,9 @@ pheatmap(heat_mat_T_post,
 ggbiplot(prcomp(t(heat_mat_T_post), scale.=T), 
          choices = c(1,2),
          ellipse=T, groups=factor(T_postres_coldata$condition, levels = c("S", "NS")),
-         var.axes=T, var.scale=1) + 
+         var.axes=F, var.scale=1) + 
   theme_classic() + 
-  xlim(-2.5,4) +
+  xlim(-2.5,2) +
   ylim(-3.5,3) +
   # theme(legend.position = "top") +
   ggtitle("PCA Plot - T Post-Resection Signature") 
