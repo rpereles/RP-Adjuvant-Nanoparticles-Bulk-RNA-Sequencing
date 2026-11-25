@@ -1,7 +1,7 @@
 ---
-title: "260529 NCAP BulkSeq Signatures"
+title: "261015 NCAP BulkSeq Signatures"
 output: html_document
-date: "2026-05-01"
+date: "2026-10-15"
 author: Rebecca Pereles, Lonnie Shea Lab
 ---
 
@@ -346,6 +346,7 @@ pheatmap(heat_mat,
          cluster_cols    = TRUE,
          cluster_rows    = TRUE,
          show_colnames   = TRUE,
+         breaks          = seq(-2, 2, length.out = 101),
          fontsize_row    = 10,
          main            = "Signature Genes — UT D18 Samples")
 
@@ -360,6 +361,68 @@ ggbiplot(prcomp(t(heat_mat), scale.=T),
   xlim(-2,2.5) +
   theme(legend.position = "top") +
   ggtitle("PCA Plot - UT D18 Signature") 
+
+```
+
+# UT D18 Permutation Test
+
+```{r UT D18 Permutation Test}
+# Initialize empty vector for accuracies
+n_perm <- 100
+perm_acc_vec <- rep(NA_real_, n_perm)
+
+for (i in seq_len(n_perm)) {
+  # Permute labels
+  coldata$perm <- as.factor(sample(c("NS", "S"), length(coldata$condition), 
+                                   replace = TRUE, prob = c(0.5, 0.5)))
+  
+  # Ensure that both groups have at least 5 samples 
+  valid_permutation <- FALSE
+  while (!valid_permutation) {
+    coldata$perm <- as.factor(sample(c("NS", "S"), length(coldata$condition), 
+                                   replace = TRUE, prob = c(0.5, 0.5)))
+    
+    # Check table counts for each class label
+    counts <- table(coldata$perm)
+    
+    # Condition: Must have 2 classes, and both must have >= 5 samples
+    if (length(counts) == 2 && all(counts >= 5)) {
+      valid_permutation <- TRUE
+    }
+  }
+  
+  # Run elastic net with permuted labels
+  perm_cv_fit <- suppressWarnings(cv.glmnet(x_ut_sig, 
+                           coldata$perm, 
+                           family = "binomial", 
+                           alpha = 0.5, 
+                           nfolds = length(coldata$perm)))
+  
+  # Evaluate accuracy 
+  perm_pred_class <- predict(perm_cv_fit, x_ut_sig, s = "lambda.1se", type = "class")[, 1]
+  perm_pred_correct <- as.integer(perm_pred_class == as.character(coldata$perm))
+  
+  perm_acc_vec[i] <- round(mean(perm_pred_correct) * 100, 1)
+
+}
+
+# Accuracy of model with actual (correct) labels
+actual_class <- predict(ut_final_fit, x_ut_sig, s = "lambda.1se", type = "class")[, 1]
+actual_correct <- as.integer(actual_class == as.character(coldata$condition))
+
+# Histogram for visualization
+hist(perm_acc_vec, 
+     main = "UT D18 Permuation Test Accuracy (n=100)", # Chart title
+     xlab = "Accuracy (%)",                    # X-axis label
+     ylab = "Frequency",                       # Y-axis label
+     col = "skyblue",                          # Bar color
+     border = "black",                         # Border color
+     breaks = 10)                              # Number of bins
+
+abline(v = mean(actual_correct) * 100, 
+       col = "red",           # Color of the line
+       lwd = 3,               # Line width (thickness)
+       lty = "solid")        # Line type ("dashed", "dotted", "solid")
 
 ```
 
@@ -532,6 +595,7 @@ pheatmap(heat_mat_T,
          cluster_cols    = TRUE,
          cluster_rows    = TRUE,
          show_colnames   = TRUE,
+         breaks          = seq(-2, 2, length.out = 101),
          fontsize_row    = 10,
          main            = "Signature Genes — T D18 Samples")
 
@@ -663,7 +727,9 @@ cat("Predicted classes (T samples):\n")
 print(T_S_D18pred_df)
 
 ```
+
 ### Rescued Phenotype - Clustering Visualization 
+
 ```{r D18 UT Samples and T S Heatmap}
 # Create DESeq2 object with all samples of interest
 mostD18 <- dplyr::bind_rows(as.data.frame(T_S_D18_sig), as.data.frame(x_ut_sig))
@@ -691,6 +757,7 @@ pheatmap(vst_mostD18,
          cluster_cols    = TRUE,
          cluster_rows    = TRUE,
          show_colnames   = TRUE,
+         breaks          = seq(-2, 2, length.out = 101),
          fontsize_row    = 10,
          main            = "Unsupervised Clustering - UT D18 Signature")
 
@@ -700,22 +767,23 @@ pheatmap(vst_mostD18,
 clustD18test <- vst_mostD18[,!grepl("UT_S", colnames(vst_mostD18))]
 
 clustD18test_coldata <- data.frame(row.names = colnames(clustD18test), 
-                      condition = ifelse(grepl("T_S", colnames(clustD18test)), 
+                    Condition = ifelse(grepl("T_S", colnames(clustD18test)), 
                                          "S", "NS"))
-clustD18test_coldata$condition <- factor(clustD18test_coldata$condition, levels = c("NS", "S"))
+clustD18test_coldata$Condition <- factor(clustD18test_coldata$Condition, levels = c("NS", "S"))
 
 # Annotation bar for condition
-anno_col_clustD18test <- data.frame(Condition = clustD18test_coldata$condition, row.names = rownames(clustD18test_coldata))
+clust3colors <- list(Condition = c(NS="#00dae0", S="salmon", Rsc="grey"))
 
 pheatmap(clustD18test,
-         annotation_col  = anno_col_clustD18test,
+         annotation_col  = clust3_D18_coldata,
+         annotation_colors = clust3colors,
          scale           = "row",
          cluster_cols    = TRUE,
          cluster_rows    = TRUE,
          show_colnames   = TRUE,
+         breaks          = seq(-2, 2, length.out = 101),
          fontsize_row    = 10,
          main            = "Unsupervised Clustering - UT D18 Signature w/o UT S")
-
 
 
 # Separate out all T S samples to see if the rescued mice cluster separately
@@ -739,6 +807,7 @@ pheatmap(Rsc_T_D18,
          cluster_cols      = TRUE,
          cluster_rows      = TRUE,
          show_colnames     = TRUE,
+         breaks            = seq(-2, 2, length.out = 101),
          fontsize_row      = 10,
          main              = "Unsupervised Clustering - Rsc vs. Other T S D18")
 
@@ -748,9 +817,9 @@ pheatmap(Rsc_T_D18,
 ```{r PCA Plot of UT D18 signature applied to T S D18}
 # New coldata matrix to account for a third level (rescued phenotype - Rsc)
 clust3_D18_coldata <- clustD18test_coldata
-levels(clust3_D18_coldata$condition) <- c("NS", "S", "Rsc")
+levels(clust3_D18_coldata$Condition) <- c("NS", "S", "Rsc")
 rescued_idx <- grepl("T_S(3|6|8|9)", rownames(clustD18test_coldata))
-clust3_D18_coldata$condition[rescued_idx] <- "Rsc"
+clust3_D18_coldata$Condition[rescued_idx] <- "Rsc"
 
 ggbiplot(prcomp(t(clustD18test), scale. = T), 
          choices = c(1,2), # which PCs to plot
@@ -758,13 +827,13 @@ ggbiplot(prcomp(t(clustD18test), scale. = T),
          # labels = colnames(clustD18test),
          # labels.size = 3.5,
          # circle = T,
-         groups=factor(clust3_D18_coldata$condition, levels = c("NS", "S", "Rsc")),
+         groups=factor(clust3_D18_coldata$Condition, levels = c("NS", "S", "Rsc")),
          var.axes = F, # T = show gene contributions (arrows)
          var.scale = 1) + 
   # geom_point(aes(color = clustD18test_coldata$condition), size = 2) + # force dots
   theme_classic() + 
   xlim(-3,3) +
-  theme(legend.position = "top") +
+  theme(legend.position = "right") +
   ggtitle("UT D18 Signature - 3 Clusters") +
   scale_color_manual(values = c("NS"  = "#00BFC4", 
                                 "S"   = "salmon", 
@@ -1977,15 +2046,24 @@ vst_mat_T_post <- assay(vst(T_postres_dds))
 heat_mat_T_post <- vst_mat_T_post[signature_genes_T_post, colnames(T_postres)]
 
 # Annotation bar for condition
-anno_col_T_post <- data.frame(Condition = T_postres_coldata$condition, row.names = rownames(T_postres_coldata))
+anno_col_T_post <- data.frame(Condition = T_postres_coldata$condition, 
+                              Timepoint = T_postres_coldata$timepoint,
+                              row.names = rownames(T_postres_coldata))
+anno_colors <- list(
+  Condition = c(NS = "#00dae0", S = "salmon"),
+  Timepoint = c(W2 = "grey", W4 = "black")
+)
+
 
 pheatmap(heat_mat_T_post,
          annotation_col  = anno_col_T_post,
+         annotation_colors = anno_colors,
          scale           = "row",
          cluster_cols    = TRUE,
          cluster_rows    = TRUE,
          show_colnames   = TRUE,
          fontsize_row    = 10,
+         breaks          = seq(-2, 2, length.out = 101),
          main            = "Signature Genes — T Post-Resection Samples")
 
 ```
